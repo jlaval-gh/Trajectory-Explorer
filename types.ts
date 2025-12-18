@@ -26,6 +26,7 @@ export interface AnalysisVisual {
   mode: AnalysisMode;
   points: Point[];
   intersections?: Point[];
+  anchor?: Point;
 }
 
 export interface AnalysisResult {
@@ -38,4 +39,5 @@ export interface AnalysisResult {
   ttt: number;
   count?: number;
   waveSpeed?: number;
+  experimentId: number;
 }

@@ -27,6 +27,41 @@ export const getLineIntersection = (p1: Point, p2: Point, p3: Point, p4: Point):
   return null;
 };
 
+// Returns intersection of segment p1-p2 and line y = mx + c
+export const getSegmentLineIntersection = (p1: Point, p2: Point, m: number, c: number): Point | null => {
+  // Line 1 (Segment): y - y1 = m_s (x - x1)  =>  -m_s x + y = y1 - m_s x1
+  // Line 2 (Cut):     -m x + y = c
+  
+  // Using determinant method or simple substitution
+  // y = mx + c
+  // Check if segment is vertical
+  if (Math.abs(p2.x - p1.x) < 1e-9) {
+    const yIntersect = m * p1.x + c;
+    // Check if yIntersect is between p1.y and p2.y
+    if ((yIntersect >= Math.min(p1.y, p2.y)) && (yIntersect <= Math.max(p1.y, p2.y))) {
+      return { x: p1.x, y: yIntersect };
+    }
+    return null;
+  }
+
+  const ms = (p2.y - p1.y) / (p2.x - p1.x);
+  
+  // Parallel lines
+  if (Math.abs(m - ms) < 1e-9) return null;
+
+  // Intersection x: mx + c = ms(x - x1) + y1
+  // mx + c = ms*x - ms*x1 + y1
+  // x(m - ms) = y1 - ms*x1 - c
+  const x = (p1.y - ms * p1.x - c) / (m - ms);
+  const y = m * x + c;
+
+  // Check bounds
+  if (x >= Math.min(p1.x, p2.x) - 1e-9 && x <= Math.max(p1.x, p2.x) + 1e-9) {
+    return { x, y };
+  }
+  return null;
+};
+
 export const calculatePolygonArea = (polygon: Point[]): number => {
   let area = 0;
   for (let i = 0; i < polygon.length; i++) {
