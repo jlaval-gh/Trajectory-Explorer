@@ -1,0 +1,5 @@
+{
+  "name": "Traffic Flow Analyst (TFA)",
+  "description": "A high-precision traffic flow analysis tool for time-space trajectory diagrams. Features Edie's generalized definitions, platoon tracking, alignment mode for wave speed, and loop detector simulation.",
+  "requestFramePermissions": []
+}
