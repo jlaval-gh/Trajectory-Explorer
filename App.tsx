@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   AnalysisMode, 
@@ -16,6 +15,7 @@ import {
   getSegmentLineIntersection
 } from './utils/geometry';
 import FundamentalDiagram from './components/FundamentalDiagram';
+import { DraggableWindow } from './components/DraggableWindow';
 import { 
   Activity, 
   Layers, 
@@ -127,6 +127,31 @@ const App: React.FC = () => {
     setLogs(prev => [`[${time}] ${msg}`, ...prev]);
   }, []);
 
+  // Capture global clicks
+  useEffect(() => {
+    const handleGlobalClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      let label = target.tagName.toLowerCase();
+      // Try to find a meaningful label
+      const closestButton = target.closest('button');
+      if (closestButton) {
+          label = `button:${closestButton.innerText || closestButton.title || 'unlabeled'}`;
+      } else if (target.getAttribute('title')) {
+          label = target.getAttribute('title')!;
+      } else if (target.innerText && target.innerText.length < 20) {
+          label = `"${target.innerText}"`;
+      }
+      
+      // Clean up newlines
+      label = label.replace(/\n/g, ' ').trim();
+
+      addLog(`Click: ${label} @ (${e.clientX}, ${e.clientY})`);
+    };
+
+    window.addEventListener('click', handleGlobalClick);
+    return () => window.removeEventListener('click', handleGlobalClick);
+  }, [addLog]);
+
   // Generate random Experiment ID to ensure color variety
   const generateExperimentId = () => Math.floor(Math.random() * 100000000);
 
@@ -226,6 +251,25 @@ const App: React.FC = () => {
         ctx.fill(); 
       }
       ctx.stroke();
+
+      // Draw Slope Text for Line Mode
+      if (v.mode === AnalysisMode.LINE && v.points.length === 2) {
+        const p1 = toPixel(v.points[0]);
+        const p2 = toPixel(v.points[1]);
+        const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+        const slopeVal = results[idx]?.waveSpeed || 0;
+        const speedKmh = toSpeedKmh(slopeVal).toFixed(1);
+        
+        ctx.save();
+        ctx.fillStyle = color;
+        ctx.font = "bold 12px Inter, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        ctx.shadowColor = darkMode ? "black" : "white";
+        ctx.shadowBlur = 4;
+        ctx.fillText(`v = ${speedKmh} km/h`, mid.x + 8, mid.y - 8);
+        ctx.restore();
+      }
 
       // Intersection Dots (Conditional)
       if (v.intersections && showDots) {
@@ -406,7 +450,6 @@ const App: React.FC = () => {
     if (mode === AnalysisMode.LINE) {
       const newPoints = [...drawingPoints, worldPoint];
       if (newPoints.length === 2) {
-        addLog("Line Analysis calculated.");
         const [p1, p2] = newPoints;
         const slope = (p2.y - p1.y) / (p2.x - p1.x);
         const intersects: Point[] = [];
@@ -416,12 +459,31 @@ const App: React.FC = () => {
             if (inter) intersects.push(inter);
           }
         });
+
+        // Calculate Relative Flow (N/dt) and Density (N/dx)
+        // Note: dt is in min, dx is in meters
+        const dt = Math.abs(p2.x - p1.x);
+        const dx = Math.abs(p2.y - p1.y);
+        const count = intersects.length;
+        
+        // Avoid division by zero, use 0 if undefined
+        const flow = dt > 0.01 ? count / dt : 0; 
+        const density = dx > 1 ? count / dx : 0;
+
         setResults(prev => [...prev, {
-          mode: AnalysisMode.LINE, flow: 0, density: 0, speed: 0, area: 0, ttd: 0, ttt: 0,
-          count: intersects.length, waveSpeed: slope, experimentId
+          mode: AnalysisMode.LINE, 
+          flow: flow, 
+          density: density, 
+          speed: 0, 
+          area: 0, ttd: 0, ttt: 0,
+          count: count, 
+          waveSpeed: slope, 
+          experimentId
         }]);
         setVisuals(prev => [...prev, { mode: AnalysisMode.LINE, points: newPoints, intersections: intersects }]);
         setDrawingPoints([]);
+        
+        addLog(`Line: N=${count} | v=${toSpeedKmh(slope).toFixed(1)} km/h | q=${toFlowH(flow).toFixed(0)} veh/h | k=${toDensityKm(density).toFixed(1)} veh/km`);
       } else {
         addLog("Line point set. Click endpoint.");
         setDrawingPoints(newPoints);
@@ -429,7 +491,6 @@ const App: React.FC = () => {
     } else if (mode === AnalysisMode.POLYGON) {
       const newPoints = [...drawingPoints, worldPoint];
       if (newPoints.length === 4) {
-        addLog("Polygon Analysis calculated.");
         let ttd = 0, ttt = 0;
         const area = calculatePolygonArea(newPoints);
         trajectories.forEach(t => {
@@ -446,6 +507,7 @@ const App: React.FC = () => {
         setResults(prev => [...prev, res]);
         setVisuals(prev => [...prev, { mode: AnalysisMode.POLYGON, points: newPoints }]);
         setDrawingPoints([]);
+        addLog(`Polygon: Area=${area.toFixed(0)} | q=${toFlowH(res.flow).toFixed(0)} | k=${toDensityKm(res.density).toFixed(1)} | v=${toSpeedKmh(res.speed).toFixed(1)}`);
       } else {
         addLog(`Polygon corner ${newPoints.length}/4 set.`);
         setDrawingPoints(newPoints);
@@ -460,7 +522,9 @@ const App: React.FC = () => {
       
       for (let t = 0; t < endT; t += interval) {
         const t_center = t + interval / 2;
-        const calcY = (time: number, offsetY: number) => waveSpeed * (time - t_center) + (worldPoint.y);
+        // Fix: Apply offsetY correctly to calculate top/bottom edges of the parallelogram
+        const calcY = (time: number, offsetY: number) => waveSpeed * (time - t_center) + worldPoint.y + offsetY;
+        
         const poly = [
           { x: t, y: calcY(t, -h/2) },
           { x: t + interval, y: calcY(t + interval, -h/2) },
@@ -625,8 +689,8 @@ const App: React.FC = () => {
                  r.mode,
                  t.toFixed(2),
                  x.toFixed(1),
-                 "", // Flow
-                 "", // Density
+                 toFlowH(r.flow).toFixed(1), // Flow
+                 toDensityKm(r.density).toFixed(1), // Density
                  toSpeedKmh(r.waveSpeed || 0).toFixed(1), // Speed (Wave Speed)
                  "", // Area
                  "", // TTD
@@ -669,8 +733,8 @@ const App: React.FC = () => {
                  r.mode,
                  t.toFixed(2),
                  x.toFixed(1),
-                 "-", // Flow
-                 "-", // Density
+                 toFlowH(r.flow).toFixed(1), // Flow
+                 toDensityKm(r.density).toFixed(1), // Density
                  toSpeedKmh(r.waveSpeed || 0).toFixed(1), // Speed
                  "-", // Area
                  "-", // TTD
@@ -703,7 +767,7 @@ const App: React.FC = () => {
         <header className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="bg-indigo-600 p-2 rounded-lg"><Activity className="text-white w-6 h-6" /></div>
-            <h1 className="text-xl font-black tracking-tight uppercase">TFA v3.1</h1>
+            <h1 className="text-xl font-black tracking-tight uppercase">Trajectory Explorer</h1>
           </div>
           <div className="flex items-center gap-2">
              {/* Visual Settings Dropdown */}
@@ -845,20 +909,10 @@ const App: React.FC = () => {
           </section>
 
           <section className="space-y-3">
-            <h2 className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><ZoomIn size={14} /> Viewport</h2>
-            <div className="flex items-center gap-2">
-              <button onClick={() => setZoom(prev => Math.max(0.1, prev - 0.1))} className="flex-1 py-2 px-3 bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors" title="Zoom Out"><ZoomOut size={16} className="mx-auto" /></button>
-              <div className="px-4 text-xs font-black min-w-[60px] text-center bg-indigo-50 dark:bg-indigo-900/20 py-2 rounded-lg text-indigo-600 dark:text-indigo-400" title="Current Zoom Level">{Math.round(zoom * 100)}%</div>
-              <button onClick={() => setZoom(prev => Math.min(10, prev + 0.1))} className="flex-1 py-2 px-3 bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors" title="Zoom In"><ZoomIn size={16} className="mx-auto" /></button>
-              <button onClick={() => setZoom(1.0)} className="py-2 px-3 bg-slate-50 dark:bg-slate-800 border dark:border-slate-700 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors" title="Reset Zoom to 100%"><Maximize size={16} /></button>
-            </div>
-          </section>
-
-          <section className="space-y-3">
             <h2 className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><MousePointer2 size={14} /> Analysis Suite</h2>
             <div className="grid grid-cols-2 gap-2">
               {[
-                { id: AnalysisMode.LINE, label: 'Alignment', icon: PenTool, tip: 'Define wave speed using two points' },
+                { id: AnalysisMode.LINE, label: 'Line', icon: PenTool, tip: 'Define wave speed using two points' },
                 { id: AnalysisMode.POLYGON, label: 'Polygon', icon: Layers, tip: 'Measure density/flow in a 4-point polygon' },
                 { id: AnalysisMode.PLATOON, label: 'Platoon', icon: Move, tip: 'Track a platoon of N vehicles over space' },
                 { id: AnalysisMode.LOOP_DETECTOR, label: 'Loop Detect', icon: Target, tip: 'Simulate loop detector data collection' },
@@ -900,9 +954,29 @@ const App: React.FC = () => {
         {/* Main Canvas Area */}
         <div className="bg-white dark:bg-[#111827] rounded-[32px] shadow-2xl border dark:border-slate-800 flex flex-col flex-1 relative overflow-hidden">
           <header className="bg-slate-50/90 dark:bg-slate-950/70 backdrop-blur-md border-b dark:border-slate-800 px-8 py-4 flex justify-between items-center z-10">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-4">
               <span className="px-4 py-1.5 bg-indigo-600 text-white text-[10px] font-black rounded-full uppercase tracking-[0.2em] flex items-center gap-2 shadow-lg shadow-indigo-500/20" title="Active Workspace"><Move size={12} /> Worksurface</span>
-              {image && <span className="text-sm font-bold text-slate-500 dark:text-slate-400 tabular-nums">{extent.temporal} min × {extent.spatial} m</span>}
+              
+              {/* Zoom Controls Moved Here */}
+              <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 rounded-lg p-1 border dark:border-slate-700">
+                <button 
+                  onClick={() => setZoom(prev => Math.max(0.1, prev - 0.1))} 
+                  className="p-1 hover:bg-white dark:hover:bg-slate-700 rounded text-slate-500 dark:text-slate-400 transition-colors"
+                  title="Zoom Out"
+                >
+                  <ZoomOut size={14} />
+                </button>
+                <span className="text-[10px] font-mono font-bold text-slate-400 px-1 select-none min-w-[3ch] text-center">{Math.round(zoom * 100)}%</span>
+                <button 
+                  onClick={() => setZoom(prev => Math.min(10, prev + 0.1))} 
+                  className="p-1 hover:bg-white dark:hover:bg-slate-700 rounded text-slate-500 dark:text-slate-400 transition-colors"
+                  title="Zoom In"
+                >
+                  <ZoomIn size={14} />
+                </button>
+              </div>
+
+              {image && <span className="text-sm font-bold text-slate-500 dark:text-slate-400 tabular-nums ml-2 border-l pl-4 dark:border-slate-800">{extent.temporal} min × {extent.spatial} m</span>}
             </div>
             <div className="flex items-center gap-6">
               {mouseCoord && <div className="hidden sm:flex text-[10px] font-mono font-bold text-indigo-600 dark:text-indigo-400 gap-6 bg-white dark:bg-slate-900 border dark:border-slate-800 px-5 py-2 rounded-full shadow-sm"><span>T: {mouseCoord.x.toFixed(2)}</span><span>X: {mouseCoord.y.toFixed(1)}</span></div>}
@@ -918,6 +992,17 @@ const App: React.FC = () => {
             onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
           >
+            {/* Fundamental Diagram Overlay in Draggable Window */}
+            <DraggableWindow 
+               title="Fundamental Diagram"
+               initialPosition={{ x: 20, y: 20 }} 
+               initialSize={{ width: 280, height: 220 }}
+               defaultMinimized={true}
+               className="opacity-95 hover:opacity-100"
+            >
+               <FundamentalDiagram results={results} />
+            </DraggableWindow>
+
             {!image ? (
               <div onClick={() => fileInputRef.current?.click()} className="m-auto flex flex-col items-center justify-center cursor-pointer group p-12 text-center">
                 <Upload className="text-slate-300 dark:text-slate-700 mb-8 group-hover:text-indigo-500 transition-all group-hover:scale-110" size={140} strokeWidth={1} />
@@ -952,12 +1037,8 @@ const App: React.FC = () => {
         </div>
 
         {/* Data & Charts Area */}
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 min-h-[400px] shrink-0">
-          <div className="h-[400px]">
-            <FundamentalDiagram results={results} />
-          </div>
-          
-          {/* Data Worksheet */}
+        <div className="grid grid-cols-1 gap-6 min-h-[400px] shrink-0">
+          {/* Data Worksheet - Full Width */}
           <div className="bg-white dark:bg-[#111827] rounded-[32px] shadow-xl border dark:border-slate-800 flex flex-col overflow-hidden h-[400px]">
             <header className="px-8 py-5 border-b dark:border-slate-800 flex justify-between items-center bg-slate-50/50 dark:bg-slate-900/50">
               <h3 className="text-xl font-black flex items-center gap-3 text-slate-800 dark:text-white uppercase tracking-tight">
@@ -1005,8 +1086,12 @@ const App: React.FC = () => {
                         
                         {res.mode === AnalysisMode.LINE ? (
                           <>
-                            <td className="px-4 py-3 font-mono text-xs text-slate-400 dark:text-slate-500 italic">-</td>
-                            <td className="px-4 py-3 font-mono text-xs text-slate-400 dark:text-slate-500 italic">-</td>
+                            <td className="px-4 py-3 font-mono text-xs font-bold text-slate-900 dark:text-slate-100 bg-indigo-50/30 dark:bg-indigo-900/10">
+                              {toFlowH(res.flow).toFixed(0)}
+                            </td>
+                            <td className="px-4 py-3 font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
+                              {toDensityKm(res.density).toFixed(1)}
+                            </td>
                             <td className="px-4 py-3 font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
                               {toSpeedKmh(res.waveSpeed || 0).toFixed(1)}
                             </td>
