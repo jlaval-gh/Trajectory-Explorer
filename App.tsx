@@ -42,7 +42,10 @@ import {
   Copy,
   FileDown,
   Terminal,
-  RefreshCw
+  RefreshCw,
+  FolderOpen,
+  Map as MapIcon,
+  FileText
 } from 'lucide-react';
 
 const toFlowH = (q: number) => q * 60;
@@ -101,6 +104,10 @@ const App: React.FC = () => {
   const [darkMode, setDarkMode] = useState<boolean>(true);
   const [mouseCoord, setMouseCoord] = useState<Point | null>(null);
   
+  // Project State for Multi-Lane
+  const [lanes, setLanes] = useState<{name: string, url: string}[]>([]);
+  const [currentLaneIdx, setCurrentLaneIdx] = useState<number>(-1);
+
   // Console Logs State
   const [logs, setLogs] = useState<string[]>(["System initialized. Waiting for input..."]);
   
@@ -119,6 +126,7 @@ const App: React.FC = () => {
   const imgRef = useRef<HTMLImageElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const touchDist = useRef<number | null>(null);
 
   // Helper to add logs with timestamp
@@ -262,7 +270,8 @@ const App: React.FC = () => {
         
         ctx.save();
         ctx.fillStyle = color;
-        ctx.font = "bold 12px Inter, sans-serif";
+        // Increased font size
+        ctx.font = "bold 24px Inter, sans-serif";
         ctx.textAlign = "left";
         ctx.textBaseline = "bottom";
         ctx.shadowColor = darkMode ? "black" : "white";
@@ -483,7 +492,7 @@ const App: React.FC = () => {
         setVisuals(prev => [...prev, { mode: AnalysisMode.LINE, points: newPoints, intersections: intersects }]);
         setDrawingPoints([]);
         
-        addLog(`Line: N=${count} | v=${toSpeedKmh(slope).toFixed(1)} km/h | q=${toFlowH(flow).toFixed(0)} veh/h | k=${toDensityKm(density).toFixed(1)} veh/km`);
+        addLog(`Line: N=${count} | v=${toSpeedKmh(slope).toFixed(2)} km/h | q=${toFlowH(flow).toFixed(2)} veh/h`);
       } else {
         addLog("Line point set. Click endpoint.");
         setDrawingPoints(newPoints);
@@ -507,7 +516,7 @@ const App: React.FC = () => {
         setResults(prev => [...prev, res]);
         setVisuals(prev => [...prev, { mode: AnalysisMode.POLYGON, points: newPoints }]);
         setDrawingPoints([]);
-        addLog(`Polygon: Area=${area.toFixed(0)} | q=${toFlowH(res.flow).toFixed(0)} | k=${toDensityKm(res.density).toFixed(1)} | v=${toSpeedKmh(res.speed).toFixed(1)}`);
+        addLog(`Polygon: Area=${area.toFixed(0)} | q=${toFlowH(res.flow).toFixed(2)} | k=${toDensityKm(res.density).toFixed(2)} | v=${toSpeedKmh(res.speed).toFixed(2)}`);
       } else {
         addLog(`Polygon corner ${newPoints.length}/4 set.`);
         setDrawingPoints(newPoints);
@@ -628,30 +637,159 @@ const App: React.FC = () => {
     }
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      addLog(`Uploading file: ${file.name}`);
+  const readFileAsDataURL = (file: File): Promise<string> => {
+    return new Promise((resolve) => {
       const reader = new FileReader();
-      reader.onload = (event) => {
-        const dataUrl = event.target?.result as string;
-        const img = new Image();
-        img.onload = () => {
-          imgRef.current = img;
-          setImgDimensions({ width: img.width, height: img.height });
-          setImage(dataUrl);
-          setTrajectories([]);
-          setResults([]);
-          setVisuals([]);
-          setDrawingPoints([]);
-          setZoom(1.0);
-          setMouseCoord(null);
-          addLog("Image loaded. Workspace initialized.");
-        };
-        img.src = dataUrl;
-      };
+      reader.onload = (e) => resolve(e.target?.result as string);
       reader.readAsDataURL(file);
+    });
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files: File[] = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    addLog(`Processing ${files.length} files...`);
+
+    // Prioritize 'Open_all.txt' (case-insensitive), otherwise take the first .txt file found
+    let txtFile = files.find(f => f.name.toLowerCase() === 'open_all.txt');
+    
+    // Fallback logic: If explicitly Open_all.txt is not found, try any .txt but warn/log
+    if (!txtFile) {
+        const potentialTxt = files.find(f => f.name.toLowerCase().endsWith('.txt'));
+        if (potentialTxt) {
+             addLog(`Note: 'Open_all.txt' not found. Using '${potentialTxt.name}' instead.`);
+             txtFile = potentialTxt;
+        }
     }
+
+    if (txtFile) {
+        try {
+            const text = await txtFile.text();
+            // Split by newline and remove empty lines/carriage returns
+            const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+            
+            // Format: 
+            // 0: Number of lanes
+            // 1..N: Filenames
+            // N+1: Spatial
+            // N+2: Temporal
+            
+            if (lines.length < 4) throw new Error("Invalid config file format");
+
+            const numLanes = parseInt(lines[0]);
+            if (isNaN(numLanes)) throw new Error("Invalid number of lanes");
+
+            const filenames = lines.slice(1, numLanes + 1);
+            const spatial = parseFloat(lines[numLanes + 1]);
+            const temporal = parseFloat(lines[numLanes + 2]);
+
+            if (isNaN(spatial) || isNaN(temporal)) throw new Error("Invalid extent dimensions");
+
+            setExtent({ spatial, temporal });
+            addLog(`Config loaded: ${numLanes} lanes, ${temporal}min x ${spatial}m`);
+
+            // Match images
+            const loadedLanes: {name: string, url: string}[] = [];
+            let missingCount = 0;
+            
+            // Map over requested filenames and find them in uploaded files
+            for (const fname of filenames) {
+                // Try exact match first, then case-insensitive
+                const imgFile = files.find(f => f.name === fname || f.name.toLowerCase() === fname.toLowerCase());
+                
+                if (imgFile) {
+                    const url = await readFileAsDataURL(imgFile);
+                    loadedLanes.push({ name: fname, url });
+                } else {
+                    addLog(`Warning: Image '${fname}' listed in config but not found in upload.`);
+                    missingCount++;
+                }
+            }
+
+            if (loadedLanes.length > 0) {
+                setLanes(loadedLanes);
+                setCurrentLaneIdx(0);
+                
+                // Trigger image load for first lane
+                const img = new Image();
+                img.onload = () => {
+                   imgRef.current = img;
+                   setImgDimensions({ width: img.width, height: img.height });
+                   setImage(loadedLanes[0].url);
+                   
+                   // Reset workspace
+                   setTrajectories([]);
+                   setResults([]);
+                   setVisuals([]);
+                   setDrawingPoints([]);
+                   setZoom(1.0);
+                   setMouseCoord(null);
+                };
+                img.src = loadedLanes[0].url;
+                
+                if (missingCount > 0) {
+                    addLog(`Loaded ${loadedLanes.length} lanes. ${missingCount} images were missing.`);
+                }
+
+            } else {
+                addLog("Error: No matching image files found in this upload batch.");
+                if (files.length === 1) {
+                    addLog("Tip: Use 'Open Project Folder' to upload the config AND images together.");
+                }
+            }
+
+        } catch (err) {
+            addLog(`Error parsing config: ${err}`);
+        }
+    } else {
+        // Fallback: Standard Single Image Upload (or multiple images without config)
+        const imgFile = files.find(f => f.type.startsWith('image/'));
+        if (imgFile) {
+             const url = await readFileAsDataURL(imgFile);
+             
+             // Clear multi-lane project state
+             setLanes([]); 
+             setCurrentLaneIdx(-1);
+             
+             const img = new Image();
+             img.onload = () => {
+               imgRef.current = img;
+               setImgDimensions({ width: img.width, height: img.height });
+               setImage(url);
+               setTrajectories([]);
+               setResults([]);
+               setVisuals([]);
+               setDrawingPoints([]);
+               setZoom(1.0);
+               setMouseCoord(null);
+               addLog(`Loaded single image: ${imgFile.name}`);
+             };
+             img.src = url;
+        }
+    }
+  };
+
+  const switchLane = (idx: number) => {
+    if (idx < 0 || idx >= lanes.length) return;
+    
+    addLog(`Switching to ${lanes[idx].name}...`);
+    setCurrentLaneIdx(idx);
+    const url = lanes[idx].url;
+    
+    // Load new image
+    const img = new Image();
+    img.onload = () => {
+       imgRef.current = img;
+       setImgDimensions({ width: img.width, height: img.height });
+       setImage(url);
+       // Clear workspace for new lane
+       setTrajectories([]);
+       setResults([]);
+       setVisuals([]);
+       setDrawingPoints([]);
+    };
+    img.src = url;
   };
 
   const toggleViewMode = () => {
@@ -688,10 +826,10 @@ const App: React.FC = () => {
                  results.length - i,
                  r.mode,
                  t.toFixed(2),
-                 x.toFixed(1),
-                 toFlowH(r.flow).toFixed(1), // Flow
-                 toDensityKm(r.density).toFixed(1), // Density
-                 toSpeedKmh(r.waveSpeed || 0).toFixed(1), // Speed (Wave Speed)
+                 x.toFixed(2),
+                 toFlowH(r.flow).toFixed(2), // Flow
+                 "-", // Density for Line Mode
+                 toSpeedKmh(r.waveSpeed || 0).toFixed(2), // Speed (Wave Speed)
                  "", // Area
                  "", // TTD
                  ""  // TTT
@@ -702,12 +840,12 @@ const App: React.FC = () => {
              results.length - i,
              r.mode,
              t.toFixed(2),
-             x.toFixed(1),
-             toFlowH(r.flow).toFixed(1),
-             toDensityKm(r.density).toFixed(1),
-             toSpeedKmh(r.speed).toFixed(1),
-             r.area.toFixed(1),
-             r.ttd.toFixed(1),
+             x.toFixed(2),
+             toFlowH(r.flow).toFixed(2),
+             toDensityKm(r.density).toFixed(2),
+             toSpeedKmh(r.speed).toFixed(2),
+             r.area.toFixed(2),
+             r.ttd.toFixed(2),
              r.ttt.toFixed(2)
          ].join(",");
      });
@@ -732,10 +870,10 @@ const App: React.FC = () => {
                  results.length - i,
                  r.mode,
                  t.toFixed(2),
-                 x.toFixed(1),
-                 toFlowH(r.flow).toFixed(1), // Flow
-                 toDensityKm(r.density).toFixed(1), // Density
-                 toSpeedKmh(r.waveSpeed || 0).toFixed(1), // Speed
+                 x.toFixed(2),
+                 toFlowH(r.flow).toFixed(2), // Flow
+                 "-", // Density for Line Mode
+                 toSpeedKmh(r.waveSpeed || 0).toFixed(2), // Speed
                  "-", // Area
                  "-", // TTD
                  "-"  // TTT
@@ -746,12 +884,12 @@ const App: React.FC = () => {
              results.length - i,
              r.mode,
              t.toFixed(2),
-             x.toFixed(1),
-             toFlowH(r.flow).toFixed(1),
-             toDensityKm(r.density).toFixed(1),
-             toSpeedKmh(r.speed).toFixed(1),
-             r.area.toFixed(1),
-             r.ttd.toFixed(1),
+             x.toFixed(2),
+             toFlowH(r.flow).toFixed(2),
+             toDensityKm(r.density).toFixed(2),
+             toSpeedKmh(r.speed).toFixed(2),
+             r.area.toFixed(2),
+             r.ttd.toFixed(2),
              r.ttt.toFixed(2)
          ].join("\t");
      });
@@ -893,6 +1031,25 @@ const App: React.FC = () => {
               </div>
             </div>
           </div>
+          
+          {/* Lane Selector */}
+          {lanes.length > 0 && (
+            <section className="space-y-3">
+               <h2 className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><FolderOpen size={14} /> Project Lanes</h2>
+               <div className="bg-slate-50 dark:bg-slate-800 p-2 rounded-xl border dark:border-slate-700 max-h-[150px] overflow-y-auto custom-scrollbar">
+                  {lanes.map((lane, idx) => (
+                    <button 
+                      key={idx}
+                      onClick={() => switchLane(idx)}
+                      className={`w-full text-left px-3 py-2 rounded-lg text-xs font-bold mb-1 transition-all flex items-center gap-2 ${currentLaneIdx === idx ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'}`}
+                    >
+                      <MapIcon size={12} className={currentLaneIdx === idx ? 'text-indigo-200' : 'text-slate-400'}/>
+                      <span className="truncate">{lane.name.replace('.bmp', '')}</span>
+                    </button>
+                  ))}
+               </div>
+            </section>
+          )}
 
           <section className="space-y-3">
             <h2 className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Settings size={14} /> Domain Parameters</h2>
@@ -981,10 +1138,22 @@ const App: React.FC = () => {
             <div className="flex items-center gap-6">
               {mouseCoord && <div className="hidden sm:flex text-[10px] font-mono font-bold text-indigo-600 dark:text-indigo-400 gap-6 bg-white dark:bg-slate-900 border dark:border-slate-800 px-5 py-2 rounded-full shadow-sm"><span>T: {mouseCoord.x.toFixed(2)}</span><span>X: {mouseCoord.y.toFixed(1)}</span></div>}
               {isProcessing && <div className="flex items-center gap-2 text-indigo-600 animate-pulse"><Activity size={16} /><span className="text-[10px] font-black uppercase tracking-tighter">Processing</span></div>}
-              <button onClick={() => fileInputRef.current?.click()} className="p-2.5 rounded-xl bg-white dark:bg-slate-800 border dark:border-slate-700 shadow-sm hover:text-indigo-600 hover:border-indigo-400 transition-all" title="Upload Trajectory Image"><Upload size={20} /></button>
+              <button onClick={() => folderInputRef.current?.click()} className="p-2.5 rounded-xl bg-white dark:bg-slate-800 border dark:border-slate-700 shadow-sm hover:text-indigo-600 hover:border-indigo-400 transition-all" title="Open Project Folder (Config + Images)"><FolderOpen size={20} /></button>
+              <button onClick={() => fileInputRef.current?.click()} className="p-2.5 rounded-xl bg-white dark:bg-slate-800 border dark:border-slate-700 shadow-sm hover:text-indigo-600 hover:border-indigo-400 transition-all" title="Upload Single Trajectory Image"><Upload size={20} /></button>
             </div>
           </header>
           
+          {/* Fundamental Diagram Overlay in Draggable Window - MOVED OUTSIDE of scroll container */}
+          <DraggableWindow 
+               title="Fundamental Diagram"
+               initialPosition={{ x: 20, y: 100 }} 
+               initialSize={{ width: 280, height: 220 }}
+               defaultMinimized={true}
+               className="opacity-95 hover:opacity-100"
+            >
+               <FundamentalDiagram results={results} />
+          </DraggableWindow>
+
           <div 
             className="relative flex-1 overflow-auto bg-slate-100/50 dark:bg-[#080c14] custom-scrollbar flex touch-none"
             // Pinch-to-Zoom Event Handlers
@@ -992,22 +1161,25 @@ const App: React.FC = () => {
             onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
           >
-            {/* Fundamental Diagram Overlay in Draggable Window */}
-            <DraggableWindow 
-               title="Fundamental Diagram"
-               initialPosition={{ x: 20, y: 20 }} 
-               initialSize={{ width: 280, height: 220 }}
-               defaultMinimized={true}
-               className="opacity-95 hover:opacity-100"
-            >
-               <FundamentalDiagram results={results} />
-            </DraggableWindow>
-
             {!image ? (
-              <div onClick={() => fileInputRef.current?.click()} className="m-auto flex flex-col items-center justify-center cursor-pointer group p-12 text-center">
-                <Upload className="text-slate-300 dark:text-slate-700 mb-8 group-hover:text-indigo-500 transition-all group-hover:scale-110" size={140} strokeWidth={1} />
-                <h3 className="text-4xl font-black text-slate-800 dark:text-white group-hover:text-indigo-600 transition-colors uppercase tracking-tight">Import Trajectories</h3>
-                <p className="text-slate-500 dark:text-slate-400 max-w-sm mt-4 font-bold text-lg">Select a time-space BMP/PNG to initialize the flow analyst.</p>
+              <div className="m-auto flex flex-col items-center justify-center gap-8 max-w-2xl">
+                 <div onClick={() => folderInputRef.current?.click()} className="w-full flex flex-col items-center justify-center cursor-pointer group p-10 text-center bg-white dark:bg-slate-800/50 rounded-3xl border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-indigo-500 dark:hover:border-indigo-500 hover:bg-indigo-50/50 dark:hover:bg-indigo-900/10 transition-all">
+                    <FolderOpen className="text-slate-400 dark:text-slate-500 mb-4 group-hover:text-indigo-500 transition-all group-hover:scale-110" size={64} strokeWidth={1.5} />
+                    <h3 className="text-xl font-black text-slate-800 dark:text-white group-hover:text-indigo-600 transition-colors uppercase tracking-tight">Open Project Folder</h3>
+                    <p className="text-slate-500 dark:text-slate-400 max-w-sm mt-2 text-sm">Select a folder containing a <code>Open_all.txt</code> config and lane images (.bmp) to load a full project.</p>
+                 </div>
+
+                 <div className="flex items-center gap-4 w-full">
+                    <div className="h-px bg-slate-300 dark:bg-slate-700 flex-1"></div>
+                    <span className="text-xs font-bold uppercase text-slate-400">Or</span>
+                    <div className="h-px bg-slate-300 dark:bg-slate-700 flex-1"></div>
+                 </div>
+
+                 <div onClick={() => fileInputRef.current?.click()} className="w-full flex flex-col items-center justify-center cursor-pointer group p-10 text-center bg-white dark:bg-slate-800/50 rounded-3xl border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-indigo-500 dark:hover:border-indigo-500 hover:bg-indigo-50/50 dark:hover:bg-indigo-900/10 transition-all">
+                    <FileText className="text-slate-400 dark:text-slate-500 mb-4 group-hover:text-indigo-500 transition-all group-hover:scale-110" size={64} strokeWidth={1.5} />
+                    <h3 className="text-xl font-black text-slate-800 dark:text-white group-hover:text-indigo-600 transition-colors uppercase tracking-tight">Upload Single Image</h3>
+                    <p className="text-slate-500 dark:text-slate-400 max-w-sm mt-2 text-sm">Select a single trajectory image (.bmp, .png) to start a quick session.</p>
+                 </div>
               </div>
             ) : (
               <div className="m-auto p-12">
@@ -1032,7 +1204,22 @@ const App: React.FC = () => {
                 )}
               </div>
             )}
-            <input type="file" ref={fileInputRef} onChange={handleImageUpload} className="hidden" accept="image/*" />
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              onChange={handleFileUpload} 
+              className="hidden" 
+              accept=".bmp,.png,.jpg,.jpeg,.txt" 
+              multiple 
+            />
+            {/* Folder Input - Uses non-standard attributes for directory selection */}
+            <input 
+              type="file" 
+              ref={folderInputRef} 
+              onChange={handleFileUpload} 
+              className="hidden" 
+              {...{ webkitdirectory: "", directory: "" } as any}
+            />
           </div>
         </div>
 
@@ -1082,18 +1269,18 @@ const App: React.FC = () => {
                           {res.mode}
                         </td>
                         <td className="px-4 py-3 font-mono text-xs text-slate-700 dark:text-slate-300">{t.toFixed(2)}</td>
-                        <td className="px-4 py-3 font-mono text-xs text-slate-700 dark:text-slate-300">{x.toFixed(1)}</td>
+                        <td className="px-4 py-3 font-mono text-xs text-slate-700 dark:text-slate-300">{x.toFixed(2)}</td>
                         
                         {res.mode === AnalysisMode.LINE ? (
                           <>
                             <td className="px-4 py-3 font-mono text-xs font-bold text-slate-900 dark:text-slate-100 bg-indigo-50/30 dark:bg-indigo-900/10">
-                              {toFlowH(res.flow).toFixed(0)}
+                              {toFlowH(res.flow).toFixed(2)}
+                            </td>
+                            <td className="px-4 py-3 font-mono text-xs text-slate-400 dark:text-slate-500 italic">
+                              -
                             </td>
                             <td className="px-4 py-3 font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
-                              {toDensityKm(res.density).toFixed(1)}
-                            </td>
-                            <td className="px-4 py-3 font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
-                              {toSpeedKmh(res.waveSpeed || 0).toFixed(1)}
+                              {toSpeedKmh(res.waveSpeed || 0).toFixed(2)}
                             </td>
                             <td className="px-4 py-3 font-mono text-xs text-slate-400 dark:text-slate-500 italic">-</td>
                             <td className="px-4 py-3 font-mono text-xs text-slate-400 dark:text-slate-500 italic">-</td>
@@ -1102,19 +1289,19 @@ const App: React.FC = () => {
                         ) : (
                           <>
                             <td className="px-4 py-3 font-mono text-xs font-bold text-slate-900 dark:text-slate-100 bg-indigo-50/30 dark:bg-indigo-900/10">
-                              {toFlowH(res.flow).toFixed(0)}
+                              {toFlowH(res.flow).toFixed(2)}
                             </td>
                             <td className="px-4 py-3 font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
-                              {toDensityKm(res.density).toFixed(1)}
+                              {toDensityKm(res.density).toFixed(2)}
                             </td>
                             <td className="px-4 py-3 font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
-                              {toSpeedKmh(res.speed).toFixed(1)}
+                              {toSpeedKmh(res.speed).toFixed(2)}
                             </td>
                             <td className="px-4 py-3 font-mono text-xs text-slate-500 dark:text-slate-500">
-                              {res.area.toFixed(1)}
+                              {res.area.toFixed(2)}
                             </td>
                             <td className="px-4 py-3 font-mono text-xs text-slate-500 dark:text-slate-500">
-                              {res.ttd.toFixed(1)}
+                              {res.ttd.toFixed(2)}
                             </td>
                             <td className="px-4 py-3 font-mono text-xs text-slate-500 dark:text-slate-500">
                               {res.ttt.toFixed(2)}

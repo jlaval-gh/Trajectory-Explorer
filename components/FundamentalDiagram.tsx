@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Label, ReferenceLine, ReferenceDot, Customized } from 'recharts';
 import { AnalysisResult, AnalysisMode } from '../types';
-import { Ruler, Trash2, MousePointerClick } from 'lucide-react';
+import { Ruler, Trash2, Gauge, Activity } from 'lucide-react';
 
 interface FundamentalDiagramProps {
   results: AnalysisResult[];
@@ -20,6 +20,8 @@ const COLORS = [
   '#d946ef', // Fuchsia 500
   '#f43f5e', // Rose 500
 ];
+
+type ChartMode = 'flow' | 'speed';
 
 // Robust Overlay Component to capture clicks via SVG coordinates and invert D3 scales
 const SlopeClickLayer = (props: any) => {
@@ -51,8 +53,8 @@ const SlopeClickLayer = (props: any) => {
                     
                     if (xScale?.scale && yScale?.scale) {
                         const k = xScale.scale.invert(svgP.x);
-                        const q = yScale.scale.invert(svgP.y);
-                        onChartClick(k, q);
+                        const val = yScale.scale.invert(svgP.y);
+                        onChartClick(k, val);
                     }
                  }
             }}
@@ -81,8 +83,13 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
   const textColor = isDarkMode ? '#94a3b8' : '#64748b';
   const gridColor = isDarkMode ? '#1e293b' : '#e2e8f0';
 
+  const [chartMode, setChartMode] = useState<ChartMode>('flow');
   const [isSlopeMode, setIsSlopeMode] = useState(false);
-  const [slopePoints, setSlopePoints] = useState<{k: number, q: number}[]>([]);
+  
+  // Current incomplete line points
+  const [currentPoints, setCurrentPoints] = useState<{x: number, y: number}[]>([]);
+  // Completed lines
+  const [savedLines, setSavedLines] = useState<{p1: {x: number, y: number}, p2: {x: number, y: number}}[]>([]);
 
   const groupedResults = results.reduce((acc, r) => {
     if (!acc[r.experimentId]) acc[r.experimentId] = [];
@@ -91,51 +98,71 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
   }, {} as Record<number, AnalysisResult[]>);
 
   // Callback for the robust overlay
-  const handleOverlayClick = (k: number, q: number) => {
+  const handleOverlayClick = (x: number, y: number) => {
     // Validate bounds
-    if (k < 0 || q < 0) return; // Basic sanity check
+    if (x < 0 || y < 0) return; // Basic sanity check
 
-    const newPoint = { k, q };
-    setSlopePoints(prev => {
-        if (prev.length >= 2) return [newPoint];
-        return [...prev, newPoint];
-    });
+    const newPoint = { x, y };
+    
+    if (currentPoints.length === 0) {
+        setCurrentPoints([newPoint]);
+    } else {
+        // Complete the line
+        setSavedLines(prev => [...prev, { p1: currentPoints[0], p2: newPoint }]);
+        setCurrentPoints([]); // Reset current
+    }
   };
 
-  const calculateSlope = () => {
-    if (slopePoints.length < 2) return null;
-    const p1 = slopePoints[0];
-    const p2 = slopePoints[1];
-    if (Math.abs(p2.k - p1.k) < 0.0001) return null;
-    return (p2.q - p1.q) / (p2.k - p1.k);
+  const calculateSlope = (p1: {x: number, y: number}, p2: {x: number, y: number}) => {
+     if (Math.abs(p2.x - p1.x) < 0.0001) return null;
+     return (p2.y - p1.y) / (p2.x - p1.x);
   };
-
-  const slope = calculateSlope();
 
   return (
     <div className={`w-full h-full flex flex-col p-4`}>
       <div className="flex justify-between items-center mb-2">
         <h3 className="text-sm font-bold text-slate-800 dark:text-white flex items-center gap-2">
           <div className="w-1 h-4 bg-indigo-600 rounded-full mr-1"></div>
-          Fundamental Diagram
+          {chartMode === 'flow' ? 'Flow-Density' : 'Speed-Density'}
         </h3>
         <div className="flex items-center gap-1">
-           {isSlopeMode && slopePoints.length > 0 && (
-              <span className="text-[10px] font-mono font-bold text-indigo-500 bg-indigo-50 dark:bg-indigo-900/30 px-2 py-0.5 rounded">
-                {slopePoints.length === 1 ? 'Select P2' : `v=${slope?.toFixed(1)}`}
-              </span>
-           )}
+           {/* Chart Mode Toggle */}
+           <button
+             onClick={() => {
+                 setChartMode(prev => prev === 'flow' ? 'speed' : 'flow');
+                 setSavedLines([]); // Clear lines on mode switch to avoid confusion
+                 setCurrentPoints([]);
+             }}
+             className="p-1.5 rounded-md bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-indigo-600 transition-colors"
+             title={chartMode === 'flow' ? "Switch to Speed vs Density" : "Switch to Flow vs Density"}
+           >
+              {chartMode === 'flow' ? <Gauge size={12} /> : <Activity size={12} />}
+           </button>
+
+           <div className="w-px h-4 bg-slate-200 dark:bg-slate-700 mx-1"></div>
+
+           {/* Tool Controls */}
            <button
              onClick={() => { 
                 setIsSlopeMode(!isSlopeMode); 
-                setSlopePoints([]); 
+                setCurrentPoints([]); 
              }}
              className={`p-1.5 rounded-md transition-all border flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider ${isSlopeMode ? 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 border-indigo-200 dark:border-indigo-800' : 'bg-slate-50 dark:bg-slate-800 border-transparent text-slate-400 hover:text-slate-600'}`}
-             title={isSlopeMode ? "Exit Speed Tool" : "Measure Wave Speed"}
+             title={isSlopeMode ? "Exit Drawing Mode" : "Draw Reference Lines"}
            >
-             {isSlopeMode ? <Trash2 size={12} /> : <Ruler size={12} />}
-             {isSlopeMode ? "Clear" : "Tool"}
+             <Ruler size={12} />
+             {isSlopeMode ? "Active" : "Draw"}
            </button>
+           
+           {(savedLines.length > 0 || currentPoints.length > 0) && (
+               <button
+                 onClick={() => { setSavedLines([]); setCurrentPoints([]); }}
+                 className="p-1.5 rounded-md bg-red-50 dark:bg-red-900/20 text-red-500 hover:text-red-600 transition-colors"
+                 title="Clear all lines"
+               >
+                 <Trash2 size={12} />
+               </button>
+           )}
         </div>
       </div>
       
@@ -157,15 +184,22 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
             </XAxis>
             <YAxis 
               type="number" 
-              dataKey="q" 
-              name="Flow" 
+              dataKey="val" 
+              name={chartMode === 'flow' ? "Flow" : "Speed"}
               stroke={textColor}
               fontSize={9}
               tick={{ fontWeight: 600 }}
               allowDataOverflow={false}
               domain={['auto', 'auto']}
             >
-              <Label value="Flow (veh/h)" angle={-90} position="insideLeft" offset={10} fill={textColor} style={{ fontWeight: 700, fontSize: '9px', textTransform: 'uppercase' }} />
+              <Label 
+                 value={chartMode === 'flow' ? "Flow (veh/h)" : "Speed (km/h)"} 
+                 angle={-90} 
+                 position="insideLeft" 
+                 offset={10} 
+                 fill={textColor} 
+                 style={{ fontWeight: 700, fontSize: '9px', textTransform: 'uppercase' }} 
+              />
             </YAxis>
             
             {!isSlopeMode && (
@@ -180,6 +214,10 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
                   fontWeight: 'bold',
                   boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
                 }}
+                formatter={(value: number, name: string) => [
+                    value.toFixed(1), 
+                    name === 'val' ? (chartMode === 'flow' ? 'Flow' : 'Speed') : name
+                ]}
               />
             )}
 
@@ -187,13 +225,20 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
                const validGroup = group.filter(r => r.density > 0 || r.flow > 0);
                if (validGroup.length === 0) return null;
 
-               const data = validGroup.map((r, i) => ({
-                 k: r.density * 1000, 
-                 q: r.flow * 60,
-                 id: i,
-                 mode: r.mode,
-                 experimentId: r.experimentId
-               }));
+               const data = validGroup.map((r, i) => {
+                 const k = r.density * 1000;
+                 const q = r.flow * 60;
+                 // Prevent division by zero if density is 0
+                 const v = k > 0.1 ? q / k : 0; 
+                 
+                 return {
+                   k: k,
+                   val: chartMode === 'flow' ? q : v,
+                   id: i,
+                   mode: r.mode,
+                   experimentId: r.experimentId
+                 };
+               });
 
                const isPlatoon = validGroup[0].mode === AnalysisMode.PLATOON;
                const color = COLORS[validGroup[0].experimentId % COLORS.length];
@@ -209,37 +254,43 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
                     shape={renderCustomPoint}
                     isAnimationActive={false}
                     onClick={(e: any) => {
-                         if(isSlopeMode && e.payload) handleOverlayClick(e.payload.k, e.payload.q);
+                         if(isSlopeMode && e.payload) handleOverlayClick(e.payload.k, e.payload.val);
                     }}
                     style={{ cursor: isSlopeMode ? 'crosshair' : 'default' }}
                  />
                );
             })}
             
-            {isSlopeMode && slopePoints.map((p, i) => (
-               <ReferenceDot key={i} x={p.k} y={p.q} r={4} fill="#6366f1" stroke="white" strokeWidth={2} />
+            {/* Draw Saved Lines */}
+            {savedLines.map((line, i) => {
+                const slope = calculateSlope(line.p1, line.p2);
+                return (
+                   <React.Fragment key={`saved-${i}`}>
+                        <ReferenceLine 
+                            segment={[line.p1, line.p2]} 
+                            stroke="#6366f1" 
+                            strokeWidth={2} 
+                            strokeDasharray="4 4"
+                            isFront={true}
+                        >
+                            <Label 
+                               value={chartMode === 'flow' ? `${slope?.toFixed(1)} km/h` : ''} 
+                               position="insideTop" 
+                               fill={isDarkMode ? '#818cf8' : '#4f46e5'} 
+                               fontWeight={900}
+                               fontSize={10}
+                            />
+                        </ReferenceLine>
+                        <ReferenceDot x={line.p1.x} y={line.p1.y} r={3} fill="#6366f1" />
+                        <ReferenceDot x={line.p2.x} y={line.p2.y} r={3} fill="#6366f1" />
+                   </React.Fragment>
+                );
+            })}
+
+            {/* Draw Current In-Progress Point */}
+            {isSlopeMode && currentPoints.map((p, i) => (
+               <ReferenceDot key={`curr-${i}`} x={p.x} y={p.y} r={4} fill="#f43f5e" stroke="white" strokeWidth={2} />
             ))}
-            
-            {isSlopeMode && slopePoints.length === 2 && (
-              <ReferenceLine 
-                segment={[
-                  { x: slopePoints[0].k, y: slopePoints[0].q },
-                  { x: slopePoints[1].k, y: slopePoints[1].q }
-                ]} 
-                stroke="#6366f1" 
-                strokeWidth={2} 
-                strokeDasharray="4 4"
-                isFront={true}
-              >
-                <Label 
-                   value={`${slope?.toFixed(1)}`} 
-                   position="insideTop" 
-                   fill={isDarkMode ? '#818cf8' : '#4f46e5'} 
-                   fontWeight={900}
-                   fontSize={10}
-                />
-              </ReferenceLine>
-            )}
             
             <Customized component={<SlopeClickLayer onChartClick={handleOverlayClick} isSlopeMode={isSlopeMode} />} />
 
