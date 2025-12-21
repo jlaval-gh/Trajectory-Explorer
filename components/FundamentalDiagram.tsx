@@ -1,27 +1,39 @@
 import React, { useState } from 'react';
 import { ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Label, ReferenceLine, ReferenceDot, Customized } from 'recharts';
 import { AnalysisResult, AnalysisMode } from '../types';
-import { Ruler, Trash2, Gauge, Activity } from 'lucide-react';
+import { Ruler, Trash2, ChevronDown } from 'lucide-react';
 
 interface FundamentalDiagramProps {
   results: AnalysisResult[];
+  onRecordLog?: (msg: string) => void;
 }
 
+// Darker colors as requested
 const COLORS = [
-  '#ef4444', // Red 500
-  '#f97316', // Orange 500
-  '#f59e0b', // Amber 500
-  '#84cc16', // Lime 500
-  '#10b981', // Emerald 500
-  '#06b6d4', // Cyan 500
-  '#3b82f6', // Blue 500
-  '#6366f1', // Indigo 500
-  '#8b5cf6', // Violet 500
-  '#d946ef', // Fuchsia 500
-  '#f43f5e', // Rose 500
+  '#991b1b', // Red 800
+  '#9a3412', // Orange 800
+  '#92400e', // Amber 800
+  '#3f6212', // Lime 800
+  '#065f46', // Emerald 800
+  '#155e75', // Cyan 800
+  '#1e40af', // Blue 800
+  '#3730a3', // Indigo 800
+  '#5b21b6', // Violet 800
+  '#86198f', // Fuchsia 800
+  '#9f1239', // Rose 800
 ];
 
-type ChartMode = 'flow' | 'speed';
+type ChartMode = 'k-q' | 'k-v' | 's-v' | 'q-v' | 'q-p' | 'p-h' | 's-h';
+
+const axisConfig: Record<ChartMode, { x: string; y: string; xName: string; yName: string; xUnit: string; yUnit: string }> = {
+    'k-q': { x: 'k', y: 'q', xName: 'Density', yName: 'Flow', xUnit: 'veh/km', yUnit: 'veh/h' },
+    'k-v': { x: 'k', y: 'v', xName: 'Density', yName: 'Speed', xUnit: 'veh/km', yUnit: 'km/h' },
+    's-v': { x: 's', y: 'v', xName: 'Spacing', yName: 'Speed', xUnit: 'm', yUnit: 'km/h' },
+    'q-v': { x: 'q', y: 'v', xName: 'Flow', yName: 'Speed', xUnit: 'veh/h', yUnit: 'km/h' },
+    'q-p': { x: 'q', y: 'p', xName: 'Flow', yName: 'Pace', xUnit: 'veh/h', yUnit: 'min/km' },
+    'p-h': { x: 'p', y: 'h', xName: 'Pace', yName: 'Headway', xUnit: 'min/km', yUnit: 's' },
+    's-h': { x: 's', y: 'h', xName: 'Spacing', yName: 'Headway', xUnit: 'm', yUnit: 's' },
+};
 
 // Robust Overlay Component to capture clicks via SVG coordinates and invert D3 scales
 const SlopeClickLayer = (props: any) => {
@@ -65,25 +77,27 @@ const SlopeClickLayer = (props: any) => {
 const renderCustomPoint = (props: any) => {
   const { cx, cy, fill, payload } = props;
 
+  // Use ID 0 for the start of the platoon measurement series
   if (payload && payload.mode === AnalysisMode.PLATOON && payload.id === 0) {
+    const s = 5; 
     return (
       <path
-        d={`M ${cx} ${cy - 6} L ${cx + 1.5} ${cy - 2} L ${cx + 6} ${cy - 2} L ${cx + 2.5} ${cy + 1.5} L ${cx + 4} ${cy + 6} L ${cx} ${cy + 3.5} L ${cx - 4} ${cy + 6} L ${cx - 2.5} ${cy + 1.5} L ${cx - 6} ${cy - 2} L ${cx - 1.5} ${cy - 2} Z`}
-        fill={fill}
+        d={`M ${cx - s} ${cy - s} L ${cx + s} ${cy + s} M ${cx + s} ${cy - s} L ${cx - s} ${cy + s}`}
         stroke={fill}
-        strokeWidth={1}
+        strokeWidth={2.5}
+        fill="none"
       />
     );
   }
   return <circle cx={cx} cy={cy} r={5} fill={fill} />;
 };
 
-const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
+const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results, onRecordLog }) => {
   const isDarkMode = document.documentElement.classList.contains('dark');
   const textColor = isDarkMode ? '#94a3b8' : '#64748b';
   const gridColor = isDarkMode ? '#1e293b' : '#e2e8f0';
 
-  const [chartMode, setChartMode] = useState<ChartMode>('flow');
+  const [chartMode, setChartMode] = useState<ChartMode>('k-q');
   const [isSlopeMode, setIsSlopeMode] = useState(false);
   
   // Current incomplete line points
@@ -97,6 +111,8 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
     return acc;
   }, {} as Record<number, AnalysisResult[]>);
 
+  const config = axisConfig[chartMode];
+
   // Callback for the robust overlay
   const handleOverlayClick = (x: number, y: number) => {
     // Validate bounds
@@ -108,8 +124,18 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
         setCurrentPoints([newPoint]);
     } else {
         // Complete the line
-        setSavedLines(prev => [...prev, { p1: currentPoints[0], p2: newPoint }]);
+        const newLine = { p1: currentPoints[0], p2: newPoint };
+        setSavedLines(prev => [...prev, newLine]);
         setCurrentPoints([]); // Reset current
+        
+        // Log slope
+        const slope = calculateSlope(newLine.p1, newLine.p2);
+        if (slope !== null && onRecordLog) {
+           let msg = `Chart Measurement: Slope = ${slope.toFixed(2)}`;
+           if (chartMode === 'k-q') msg += ` km/h (Wave Speed)`;
+           else msg += ` [${config.yUnit}/${config.xUnit}]`;
+           onRecordLog(msg);
+        }
     }
   };
 
@@ -120,25 +146,29 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
 
   return (
     <div className={`w-full h-full flex flex-col p-4`}>
-      <div className="flex justify-between items-center mb-2">
-        <h3 className="text-sm font-bold text-slate-800 dark:text-white flex items-center gap-2">
-          <div className="w-1 h-4 bg-indigo-600 rounded-full mr-1"></div>
-          {chartMode === 'flow' ? 'Flow-Density' : 'Speed-Density'}
-        </h3>
-        <div className="flex items-center gap-1">
-           {/* Chart Mode Toggle */}
-           <button
-             onClick={() => {
-                 setChartMode(prev => prev === 'flow' ? 'speed' : 'flow');
+      <div className="flex justify-between items-center mb-2 gap-2">
+        <div className="relative min-w-[140px]">
+           <select 
+             value={chartMode} 
+             onChange={(e) => {
+                 setChartMode(e.target.value as ChartMode);
                  setSavedLines([]); // Clear lines on mode switch to avoid confusion
                  setCurrentPoints([]);
              }}
-             className="p-1.5 rounded-md bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-indigo-600 transition-colors"
-             title={chartMode === 'flow' ? "Switch to Speed vs Density" : "Switch to Flow vs Density"}
+             className="appearance-none w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold py-1.5 pl-3 pr-8 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
            >
-              {chartMode === 'flow' ? <Gauge size={12} /> : <Activity size={12} />}
-           </button>
+              <option value="k-q">Flow-Density (q-k)</option>
+              <option value="k-v">Speed-Density (v-k)</option>
+              <option value="s-v">Speed-Spacing (v-s)</option>
+              <option value="q-v">Speed-Flow (v-q)</option>
+              <option value="q-p">Pace-Flow (p-q)</option>
+              <option value="p-h">Pace-Headway (p-h)</option>
+              <option value="s-h">Headway-Spacing (h-s)</option>
+           </select>
+           <ChevronDown size={14} className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+        </div>
 
+        <div className="flex items-center gap-1">
            <div className="w-px h-4 bg-slate-200 dark:bg-slate-700 mx-1"></div>
 
            {/* Tool Controls */}
@@ -172,20 +202,20 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={gridColor} />
             <XAxis 
               type="number" 
-              dataKey="k" 
-              name="Density" 
+              dataKey="x" 
+              name={config.xName} 
               stroke={textColor}
               fontSize={9}
               tick={{ fontWeight: 600 }}
               allowDataOverflow={false}
               domain={['auto', 'auto']}
             >
-              <Label value="Density (veh/km)" offset={-5} position="insideBottom" fill={textColor} style={{ fontWeight: 700, fontSize: '9px', textTransform: 'uppercase' }} />
+              <Label value={`${config.xName} (${config.xUnit})`} offset={-5} position="insideBottom" fill={textColor} style={{ fontWeight: 700, fontSize: '9px', textTransform: 'uppercase' }} />
             </XAxis>
             <YAxis 
               type="number" 
-              dataKey="val" 
-              name={chartMode === 'flow' ? "Flow" : "Speed"}
+              dataKey="y" 
+              name={config.yName}
               stroke={textColor}
               fontSize={9}
               tick={{ fontWeight: 600 }}
@@ -193,7 +223,7 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
               domain={['auto', 'auto']}
             >
               <Label 
-                 value={chartMode === 'flow' ? "Flow (veh/h)" : "Speed (km/h)"} 
+                 value={`${config.yName} (${config.yUnit})`} 
                  angle={-90} 
                  position="insideLeft" 
                  offset={10} 
@@ -216,7 +246,7 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
                 }}
                 formatter={(value: number, name: string) => [
                     value.toFixed(1), 
-                    name === 'val' ? (chartMode === 'flow' ? 'Flow' : 'Speed') : name
+                    name === 'x' ? config.xName : config.yName
                 ]}
               />
             )}
@@ -226,14 +256,27 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
                if (validGroup.length === 0) return null;
 
                const data = validGroup.map((r, i) => {
-                 const k = r.density * 1000;
-                 const q = r.flow * 60;
-                 // Prevent division by zero if density is 0
-                 const v = k > 0.1 ? q / k : 0; 
+                 const k = r.density * 1000; // veh/km
+                 const q = r.flow * 60; // veh/h
+                 const v = k > 0.001 ? q / k : 0; // km/h
+                 const s = k > 0.001 ? 1000 / k : 0; // m
+                 const h = q > 0.001 ? 3600 / q : 0; // s
+                 const p = v > 0.001 ? 60 / v : 0; // min/km
+
+                 let xVal = 0, yVal = 0;
+                 switch(chartMode) {
+                     case 'k-q': xVal = k; yVal = q; break;
+                     case 'k-v': xVal = k; yVal = v; break;
+                     case 's-v': xVal = s; yVal = v; break;
+                     case 'q-v': xVal = q; yVal = v; break;
+                     case 'q-p': xVal = q; yVal = p; break;
+                     case 'p-h': xVal = p; yVal = h; break;
+                     case 's-h': xVal = s; yVal = h; break;
+                 }
                  
                  return {
-                   k: k,
-                   val: chartMode === 'flow' ? q : v,
+                   x: xVal,
+                   y: yVal,
                    id: i,
                    mode: r.mode,
                    experimentId: r.experimentId
@@ -254,12 +297,22 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
                     shape={renderCustomPoint}
                     isAnimationActive={false}
                     onClick={(e: any) => {
-                         if(isSlopeMode && e.payload) handleOverlayClick(e.payload.k, e.payload.val);
+                         if(isSlopeMode && e.payload) handleOverlayClick(e.payload.x, e.payload.y);
                     }}
                     style={{ cursor: isSlopeMode ? 'crosshair' : 'default' }}
                  />
                );
             })}
+            
+            <Scatter 
+                data={[{x: 0, y: 0}]}
+                fill={textColor}
+                line={false}
+                shape="circle"
+                isAnimationActive={false}
+                name="Origin"
+                tooltipType="none"
+            />
             
             {/* Draw Saved Lines */}
             {savedLines.map((line, i) => {
@@ -274,7 +327,7 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results }) => {
                             isFront={true}
                         >
                             <Label 
-                               value={chartMode === 'flow' ? `${slope?.toFixed(1)} km/h` : ''} 
+                               value={slope !== null ? `${slope.toFixed(1)}` : ''} 
                                position="insideTop" 
                                fill={isDarkMode ? '#818cf8' : '#4f46e5'} 
                                fontWeight={900}

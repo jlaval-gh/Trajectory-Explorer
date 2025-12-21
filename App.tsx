@@ -45,7 +45,8 @@ import {
   RefreshCw,
   FolderOpen,
   Map as MapIcon,
-  FileText
+  FileText,
+  Import
 } from 'lucide-react';
 
 const toFlowH = (q: number) => q * 60;
@@ -57,17 +58,17 @@ const DEFAULT_WAVE_SPEED = -283.33;
 
 // Shared Color Palette for FD and Visuals
 export const EXPERIMENT_COLORS = [
-  '#ef4444', // Red 500
-  '#f97316', // Orange 500
-  '#f59e0b', // Amber 500
-  '#84cc16', // Lime 500
-  '#10b981', // Emerald 500
-  '#06b6d4', // Cyan 500
-  '#3b82f6', // Blue 500
-  '#6366f1', // Indigo 500
-  '#8b5cf6', // Violet 500
-  '#d946ef', // Fuchsia 500
-  '#f43f5e', // Rose 500
+  '#991b1b', // Red 800
+  '#9a3412', // Orange 800
+  '#92400e', // Amber 800
+  '#3f6212', // Lime 800
+  '#065f46', // Emerald 800
+  '#155e75', // Cyan 800
+  '#1e40af', // Blue 800
+  '#3730a3', // Indigo 800
+  '#5b21b6', // Violet 800
+  '#86198f', // Fuchsia 800
+  '#9f1239', // Rose 800
 ];
 
 const TRAJ_COLORS = {
@@ -85,6 +86,12 @@ enum ViewMode {
   VECTORS = 2
 }
 
+interface LaneAnalysisData {
+  trajectories: Trajectory[];
+  results: AnalysisResult[];
+  visuals: AnalysisVisual[];
+}
+
 const App: React.FC = () => {
   const [image, setImage] = useState<string | null>(null);
   const [imgDimensions, setImgDimensions] = useState<{width: number, height: number} | null>(null);
@@ -100,13 +107,17 @@ const App: React.FC = () => {
   const [platoonHeight, setPlatoonHeight] = useState<number>(30);
   const [loopInterval, setLoopInterval] = useState<number>(0.5); 
   const [loopLength, setLoopLength] = useState<number>(2.0);
-  const [zoom, setZoom] = useState<number>(1.0);
+  const [zoom, setZoom] = useState<number>(0.5);
   const [darkMode, setDarkMode] = useState<boolean>(true);
   const [mouseCoord, setMouseCoord] = useState<Point | null>(null);
   
   // Project State for Multi-Lane
   const [lanes, setLanes] = useState<{name: string, url: string}[]>([]);
   const [currentLaneIdx, setCurrentLaneIdx] = useState<number>(-1);
+  const projectDataRef = useRef<Record<number, LaneAnalysisData>>({});
+
+  // Drag and Drop State
+  const [isDragging, setIsDragging] = useState(false);
 
   // Console Logs State
   const [logs, setLogs] = useState<string[]>(["System initialized. Waiting for input..."]);
@@ -139,21 +150,13 @@ const App: React.FC = () => {
   useEffect(() => {
     const handleGlobalClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      let label = target.tagName.toLowerCase();
-      // Try to find a meaningful label
+      // Filter: Only log if clicking a button
       const closestButton = target.closest('button');
       if (closestButton) {
-          label = `button:${closestButton.innerText || closestButton.title || 'unlabeled'}`;
-      } else if (target.getAttribute('title')) {
-          label = target.getAttribute('title')!;
-      } else if (target.innerText && target.innerText.length < 20) {
-          label = `"${target.innerText}"`;
+          let label = `button:${closestButton.innerText || closestButton.title || 'unlabeled'}`;
+          label = label.replace(/\n/g, ' ').trim();
+          addLog(`Click: ${label}`);
       }
-      
-      // Clean up newlines
-      label = label.replace(/\n/g, ' ').trim();
-
-      addLog(`Click: ${label} @ (${e.clientX}, ${e.clientY})`);
     };
 
     window.addEventListener('click', handleGlobalClick);
@@ -645,11 +648,9 @@ const App: React.FC = () => {
     });
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files: File[] = Array.from(e.target.files || []);
+  // Reusable function to process files (for both Input change and Drop)
+  const processUploadedFiles = async (files: File[]) => {
     if (files.length === 0) return;
-
-    addLog(`Processing ${files.length} files...`);
 
     // Prioritize 'Open_all.txt' (case-insensitive), otherwise take the first .txt file found
     let txtFile = files.find(f => f.name.toLowerCase() === 'open_all.txt');
@@ -709,6 +710,7 @@ const App: React.FC = () => {
 
             if (loadedLanes.length > 0) {
                 setLanes(loadedLanes);
+                projectDataRef.current = {}; // Reset project data on new config load
                 setCurrentLaneIdx(0);
                 
                 // Trigger image load for first lane
@@ -723,7 +725,7 @@ const App: React.FC = () => {
                    setResults([]);
                    setVisuals([]);
                    setDrawingPoints([]);
-                   setZoom(1.0);
+                   setZoom(0.5);
                    setMouseCoord(null);
                 };
                 img.src = loadedLanes[0].url;
@@ -743,38 +745,131 @@ const App: React.FC = () => {
             addLog(`Error parsing config: ${err}`);
         }
     } else {
-        // Fallback: Standard Single Image Upload (or multiple images without config)
-        const imgFile = files.find(f => f.type.startsWith('image/'));
-        if (imgFile) {
-             const url = await readFileAsDataURL(imgFile);
-             
-             // Clear multi-lane project state
-             setLanes([]); 
-             setCurrentLaneIdx(-1);
-             
-             const img = new Image();
-             img.onload = () => {
-               imgRef.current = img;
-               setImgDimensions({ width: img.width, height: img.height });
-               setImage(url);
-               setTrajectories([]);
-               setResults([]);
-               setVisuals([]);
-               setDrawingPoints([]);
-               setZoom(1.0);
-               setMouseCoord(null);
-               addLog(`Loaded single image: ${imgFile.name}`);
-             };
-             img.src = url;
+        // Fallback: No config file found. Check for images.
+        // Support common image types and BMP specifically as requested
+        const imageFiles = files.filter(f => f.type.startsWith('image/') || /\.(bmp|jpg|jpeg|png|gif|webp)$/i.test(f.name));
+        
+        if (imageFiles.length > 0) {
+             // Sort by name to ensure consistent lane ordering (e.g. Lane1.bmp, Lane2.bmp, ...)
+             imageFiles.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+
+             if (imageFiles.length === 1) {
+                 // SINGLE IMAGE MODE
+                 const imgFile = imageFiles[0];
+                 const url = await readFileAsDataURL(imgFile);
+                 
+                 // Clear multi-lane project state
+                 setLanes([]); 
+                 projectDataRef.current = {}; 
+                 setCurrentLaneIdx(-1);
+                 
+                 const img = new Image();
+                 img.onload = () => {
+                   imgRef.current = img;
+                   setImgDimensions({ width: img.width, height: img.height });
+                   setImage(url);
+                   // Reset workspace
+                   setTrajectories([]);
+                   setResults([]);
+                   setVisuals([]);
+                   setDrawingPoints([]);
+                   setZoom(0.5);
+                   setMouseCoord(null);
+                   addLog(`Loaded single image: ${imgFile.name}`);
+                 };
+                 img.src = url;
+             } else {
+                 // MULTI IMAGE MODE (Without Config)
+                 addLog(`Found ${imageFiles.length} images. Creating ad-hoc project.`);
+                 
+                 const loadedLanes: {name: string, url: string}[] = [];
+                 for (const f of imageFiles) {
+                     const url = await readFileAsDataURL(f);
+                     loadedLanes.push({ name: f.name, url });
+                 }
+
+                 setLanes(loadedLanes);
+                 projectDataRef.current = {}; 
+                 setCurrentLaneIdx(0);
+                 
+                 // Trigger image load for first lane
+                 const img = new Image();
+                 img.onload = () => {
+                    imgRef.current = img;
+                    setImgDimensions({ width: img.width, height: img.height });
+                    setImage(loadedLanes[0].url);
+                    
+                    setTrajectories([]);
+                    setResults([]);
+                    setVisuals([]);
+                    setDrawingPoints([]);
+                    setZoom(0.5);
+                    setMouseCoord(null);
+                 };
+                 img.src = loadedLanes[0].url;
+                 addLog(`Loaded ${loadedLanes.length} lanes from images.`);
+             }
+        } else {
+            addLog("Error: No supported files (images or config) found.");
         }
     }
   };
 
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []) as File[];
+    processUploadedFiles(files);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    
+    const files = Array.from(e.dataTransfer.files) as File[];
+    processUploadedFiles(files);
+  };
+
   const switchLane = (idx: number) => {
     if (idx < 0 || idx >= lanes.length) return;
+    if (idx === currentLaneIdx) return;
     
+    // Save current lane state before switching
+    if (currentLaneIdx !== -1) {
+       projectDataRef.current[currentLaneIdx] = {
+           trajectories,
+           results,
+           visuals
+       };
+    }
+
     addLog(`Switching to ${lanes[idx].name}...`);
     setCurrentLaneIdx(idx);
+    
+    // Load new lane state (or empty if first time visiting)
+    const nextData = projectDataRef.current[idx];
+    if (nextData) {
+        setTrajectories(nextData.trajectories);
+        setResults(nextData.results);
+        setVisuals(nextData.visuals);
+    } else {
+        setTrajectories([]);
+        setResults([]);
+        setVisuals([]);
+    }
+    setDrawingPoints([]);
+
     const url = lanes[idx].url;
     
     // Load new image
@@ -783,11 +878,6 @@ const App: React.FC = () => {
        imgRef.current = img;
        setImgDimensions({ width: img.width, height: img.height });
        setImage(url);
-       // Clear workspace for new lane
-       setTrajectories([]);
-       setResults([]);
-       setVisuals([]);
-       setDrawingPoints([]);
     };
     img.src = url;
   };
@@ -1052,20 +1142,6 @@ const App: React.FC = () => {
           )}
 
           <section className="space-y-3">
-            <h2 className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Settings size={14} /> Domain Parameters</h2>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-slate-50 dark:bg-slate-800 p-3 rounded-xl border dark:border-slate-700">
-                <label className="block text-[9px] font-bold text-slate-500 uppercase mb-1">Time (min)</label>
-                <input type="number" value={extent.temporal} onChange={(e) => setExtent({...extent, temporal: Number(e.target.value)})} className="w-full bg-transparent font-bold text-sm focus:outline-none" title="Set temporal extent of the image in minutes" />
-              </div>
-              <div className="bg-slate-50 dark:bg-slate-800 p-3 rounded-xl border dark:border-slate-700">
-                <label className="block text-[9px] font-bold text-slate-500 uppercase mb-1">Space (m)</label>
-                <input type="number" value={extent.spatial} onChange={(e) => setExtent({...extent, spatial: Number(e.target.value)})} className="w-full bg-transparent font-bold text-sm focus:outline-none" title="Set spatial extent of the image in meters" />
-              </div>
-            </div>
-          </section>
-
-          <section className="space-y-3">
             <h2 className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><MousePointer2 size={14} /> Analysis Suite</h2>
             <div className="grid grid-cols-2 gap-2">
               {[
@@ -1139,34 +1215,51 @@ const App: React.FC = () => {
               {mouseCoord && <div className="hidden sm:flex text-[10px] font-mono font-bold text-indigo-600 dark:text-indigo-400 gap-6 bg-white dark:bg-slate-900 border dark:border-slate-800 px-5 py-2 rounded-full shadow-sm"><span>T: {mouseCoord.x.toFixed(2)}</span><span>X: {mouseCoord.y.toFixed(1)}</span></div>}
               {isProcessing && <div className="flex items-center gap-2 text-indigo-600 animate-pulse"><Activity size={16} /><span className="text-[10px] font-black uppercase tracking-tighter">Processing</span></div>}
               <button onClick={() => folderInputRef.current?.click()} className="p-2.5 rounded-xl bg-white dark:bg-slate-800 border dark:border-slate-700 shadow-sm hover:text-indigo-600 hover:border-indigo-400 transition-all" title="Open Project Folder (Config + Images)"><FolderOpen size={20} /></button>
-              <button onClick={() => fileInputRef.current?.click()} className="p-2.5 rounded-xl bg-white dark:bg-slate-800 border dark:border-slate-700 shadow-sm hover:text-indigo-600 hover:border-indigo-400 transition-all" title="Upload Single Trajectory Image"><Upload size={20} /></button>
+              <button onClick={() => fileInputRef.current?.click()} className="p-2.5 rounded-xl bg-white dark:bg-slate-800 border dark:border-slate-700 shadow-sm hover:text-indigo-600 hover:border-indigo-400 transition-all" title="Upload Image(s)"><Upload size={20} /></button>
             </div>
           </header>
           
-          {/* Fundamental Diagram Overlay in Draggable Window - MOVED OUTSIDE of scroll container */}
-          <DraggableWindow 
+          {/* Fundamental Diagram Overlay in Draggable Window - Only show when image is loaded */}
+          {image && (
+            <DraggableWindow 
                title="Fundamental Diagram"
                initialPosition={{ x: 20, y: 100 }} 
-               initialSize={{ width: 280, height: 220 }}
+               initialSize={{ width: 340, height: 260 }}
                defaultMinimized={true}
                className="opacity-95 hover:opacity-100"
             >
-               <FundamentalDiagram results={results} />
-          </DraggableWindow>
+               <FundamentalDiagram results={results} onRecordLog={addLog} />
+            </DraggableWindow>
+          )}
 
           <div 
-            className="relative flex-1 overflow-auto bg-slate-100/50 dark:bg-[#080c14] custom-scrollbar flex touch-none"
+            className="relative flex-1 overflow-auto bg-slate-100/50 dark:bg-[#080c14] custom-scrollbar flex touch-none transition-colors duration-200"
+            // Drag and Drop Events
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
             // Pinch-to-Zoom Event Handlers
             onTouchStart={handleTouchStart}
             onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
           >
+            {/* Drag Overlay */}
+            {isDragging && (
+                <div className="absolute inset-0 z-50 bg-indigo-500/10 backdrop-blur-sm border-4 border-dashed border-indigo-500 m-4 rounded-[20px] flex items-center justify-center animate-in fade-in duration-200 pointer-events-none">
+                     <div className="bg-white dark:bg-slate-900 p-8 rounded-3xl shadow-2xl flex flex-col items-center gap-4">
+                        <Import size={48} className="text-indigo-600 animate-bounce" />
+                        <h3 className="text-2xl font-black text-slate-800 dark:text-white uppercase">Drop Files Here</h3>
+                        <p className="text-slate-500 font-medium">Release to upload project or images</p>
+                     </div>
+                </div>
+            )}
+
             {!image ? (
               <div className="m-auto flex flex-col items-center justify-center gap-8 max-w-2xl">
                  <div onClick={() => folderInputRef.current?.click()} className="w-full flex flex-col items-center justify-center cursor-pointer group p-10 text-center bg-white dark:bg-slate-800/50 rounded-3xl border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-indigo-500 dark:hover:border-indigo-500 hover:bg-indigo-50/50 dark:hover:bg-indigo-900/10 transition-all">
                     <FolderOpen className="text-slate-400 dark:text-slate-500 mb-4 group-hover:text-indigo-500 transition-all group-hover:scale-110" size={64} strokeWidth={1.5} />
                     <h3 className="text-xl font-black text-slate-800 dark:text-white group-hover:text-indigo-600 transition-colors uppercase tracking-tight">Open Project Folder</h3>
-                    <p className="text-slate-500 dark:text-slate-400 max-w-sm mt-2 text-sm">Select a folder containing a <code>Open_all.txt</code> config and lane images (.bmp) to load a full project.</p>
+                    <p className="text-slate-500 dark:text-slate-400 max-w-sm mt-2 text-sm">Select (or Drag & Drop) a folder containing a <code>Open_all.txt</code> config and lane images (.bmp) to load a full project.</p>
                  </div>
 
                  <div className="flex items-center gap-4 w-full">
@@ -1177,8 +1270,8 @@ const App: React.FC = () => {
 
                  <div onClick={() => fileInputRef.current?.click()} className="w-full flex flex-col items-center justify-center cursor-pointer group p-10 text-center bg-white dark:bg-slate-800/50 rounded-3xl border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-indigo-500 dark:hover:border-indigo-500 hover:bg-indigo-50/50 dark:hover:bg-indigo-900/10 transition-all">
                     <FileText className="text-slate-400 dark:text-slate-500 mb-4 group-hover:text-indigo-500 transition-all group-hover:scale-110" size={64} strokeWidth={1.5} />
-                    <h3 className="text-xl font-black text-slate-800 dark:text-white group-hover:text-indigo-600 transition-colors uppercase tracking-tight">Upload Single Image</h3>
-                    <p className="text-slate-500 dark:text-slate-400 max-w-sm mt-2 text-sm">Select a single trajectory image (.bmp, .png) to start a quick session.</p>
+                    <h3 className="text-xl font-black text-slate-800 dark:text-white group-hover:text-indigo-600 transition-colors uppercase tracking-tight">Upload Image(s)</h3>
+                    <p className="text-slate-500 dark:text-slate-400 max-w-sm mt-2 text-sm">Select (or Drag & Drop) one or more trajectory images (.bmp, .png) to start a quick session.</p>
                  </div>
               </div>
             ) : (
