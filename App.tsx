@@ -1,3 +1,5 @@
+
+
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   AnalysisMode, 
@@ -139,6 +141,13 @@ const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const touchDist = useRef<number | null>(null);
+
+  const analysisCountersRef = useRef<Record<AnalysisMode, number>>({
+    [AnalysisMode.LINE]: 0,
+    [AnalysisMode.POLYGON]: 0,
+    [AnalysisMode.PLATOON]: 0,
+    [AnalysisMode.LOOP_DETECTOR]: 0,
+  });
 
   // Helper to add logs with timestamp
   const addLog = useCallback((msg: string) => {
@@ -459,6 +468,9 @@ const App: React.FC = () => {
     const experimentId = generateExperimentId(); // Random ID
     const waveSpeed = getWaveSpeed();
 
+    analysisCountersRef.current[mode]++;
+    const batchId = analysisCountersRef.current[mode];
+
     if (mode === AnalysisMode.LINE) {
       const newPoints = [...drawingPoints, worldPoint];
       if (newPoints.length === 2) {
@@ -490,12 +502,13 @@ const App: React.FC = () => {
           area: 0, ttd: 0, ttt: 0,
           count: count, 
           waveSpeed: slope, 
-          experimentId
+          experimentId,
+          batchId
         }]);
         setVisuals(prev => [...prev, { mode: AnalysisMode.LINE, points: newPoints, intersections: intersects }]);
         setDrawingPoints([]);
         
-        addLog(`Line: N=${count} | v=${toSpeedKmh(slope).toFixed(2)} km/h | q=${toFlowH(flow).toFixed(2)} veh/h`);
+        addLog(`Line ${batchId}: N=${count} | v=${toSpeedKmh(slope).toFixed(2)} km/h | q=${toFlowH(flow).toFixed(2)} veh/h`);
       } else {
         addLog("Line point set. Click endpoint.");
         setDrawingPoints(newPoints);
@@ -514,18 +527,18 @@ const App: React.FC = () => {
         const res: AnalysisResult = {
           mode: AnalysisMode.POLYGON, flow: area > 0 ? ttd / area : 0, 
           density: area > 0 ? ttt / area : 0, speed: ttt > 0 ? ttd / ttt : 0,
-          area, ttd, ttt, experimentId
+          area, ttd, ttt, experimentId, batchId
         };
         setResults(prev => [...prev, res]);
         setVisuals(prev => [...prev, { mode: AnalysisMode.POLYGON, points: newPoints }]);
         setDrawingPoints([]);
-        addLog(`Polygon: Area=${area.toFixed(0)} | q=${toFlowH(res.flow).toFixed(2)} | k=${toDensityKm(res.density).toFixed(2)} | v=${toSpeedKmh(res.speed).toFixed(2)}`);
+        addLog(`Polygon ${batchId}: Area=${area.toFixed(0)} | q=${toFlowH(res.flow).toFixed(2)} | k=${toDensityKm(res.density).toFixed(2)} | v=${toSpeedKmh(res.speed).toFixed(2)}`);
       } else {
         addLog(`Polygon corner ${newPoints.length}/4 set.`);
         setDrawingPoints(newPoints);
       }
     } else if (mode === AnalysisMode.LOOP_DETECTOR) {
-      addLog("Generating Loop Detector samples...");
+      addLog(`Generating Loop Detector samples (Batch ${batchId})...`);
       const interval = loopInterval;
       const h = loopLength;
       const endT = extent.temporal;
@@ -552,12 +565,12 @@ const App: React.FC = () => {
             ttd += m.ttd; ttt += m.ttt;
           }
         });
-        newResults.push({ mode: AnalysisMode.LOOP_DETECTOR, flow: area > 0 ? ttd/area : 0, density: area > 0 ? ttt/area : 0, speed: ttt > 0 ? ttd/ttt : 0, area, ttd, ttt, experimentId });
+        newResults.push({ mode: AnalysisMode.LOOP_DETECTOR, flow: area > 0 ? ttd/area : 0, density: area > 0 ? ttt/area : 0, speed: ttt > 0 ? ttd/ttt : 0, area, ttd, ttt, experimentId, batchId });
         newVisuals.push({ mode: AnalysisMode.POLYGON, points: poly });
       }
       setResults(prev => [...prev, ...newResults]);
       setVisuals(prev => [...prev, ...newVisuals]);
-      addLog(`Loop Detector created ${newResults.length} samples.`);
+      addLog(`Loop Detector (Batch ${batchId}) created ${newResults.length} samples.`);
     } else if (mode === AnalysisMode.PLATOON) {
       const { traj: anchorTraj, point: anchorPoint } = findClosestTrajectory(clickPx);
       if (!anchorTraj || !anchorPoint) {
@@ -577,7 +590,7 @@ const App: React.FC = () => {
          return;
       }
 
-      addLog(`Tracking Platoon (N=${platoonN}, H=${platoonHeight}m)...`);
+      addLog(`Tracking Platoon (Batch ${batchId}, N=${platoonN}, H=${platoonHeight}m)...`);
       const platoon = activeNeighbors.slice(anchorIndex, anchorIndex + platoonN).map(item => item.traj);
       const h = platoonHeight;
       const newResults: AnalysisResult[] = [];
@@ -607,7 +620,7 @@ const App: React.FC = () => {
             ttd += m.ttd; ttt += m.ttt;
           }
         });
-        newResults.push({ mode: AnalysisMode.PLATOON, flow: area > 0 ? ttd/area : 0, density: area > 0 ? ttt/area : 0, speed: ttt > 0 ? ttd/ttt : 0, area, ttd, ttt, experimentId });
+        newResults.push({ mode: AnalysisMode.PLATOON, flow: area > 0 ? ttd/area : 0, density: area > 0 ? ttt/area : 0, speed: ttt > 0 ? ttd/ttt : 0, area, ttd, ttt, experimentId, batchId });
         
         const cutIntersections: Point[] = [];
         const collectIntersections = (m: number, c: number, startP: Point, endP: Point) => {
@@ -636,7 +649,7 @@ const App: React.FC = () => {
       
       setResults(prev => [...prev, ...newResults]);
       setVisuals(prev => [...prev, ...newVisuals]);
-      addLog(`Platoon analysis finished. ${stepCount} steps.`);
+      addLog(`Platoon analysis (Batch ${batchId}) finished. ${stepCount} steps.`);
     }
   };
 
@@ -910,11 +923,12 @@ const App: React.FC = () => {
      const headers = ["ID", "Type", "Time (min)", "Loc (m)", "Flow (veh/h)", "Density (veh/km)", "Speed (km/h)", "Area (m*min)", "TTD (m)", "TTT (min)"];
      const rows = results.map((r, i) => {
          const { t, x } = getLowerRightCorner(i);
+         const type = r.batchId ? `${r.mode} ${r.batchId}` : r.mode;
          // Special handling for LINE mode
          if (r.mode === AnalysisMode.LINE) {
              return [
                  results.length - i,
-                 r.mode,
+                 type,
                  t.toFixed(2),
                  x.toFixed(2),
                  toFlowH(r.flow).toFixed(2), // Flow
@@ -928,7 +942,7 @@ const App: React.FC = () => {
          
          return [
              results.length - i,
-             r.mode,
+             type,
              t.toFixed(2),
              x.toFixed(2),
              toFlowH(r.flow).toFixed(2),
@@ -955,10 +969,11 @@ const App: React.FC = () => {
      const headers = ["ID", "Type", "Time", "Loc", "q", "k", "v", "Area", "TTD", "TTT"];
      const rows = results.map((r, i) => {
          const { t, x } = getLowerRightCorner(i);
+         const type = r.batchId ? `${r.mode} ${r.batchId}` : r.mode;
          if (r.mode === AnalysisMode.LINE) {
              return [
                  results.length - i,
-                 r.mode,
+                 type,
                  t.toFixed(2),
                  x.toFixed(2),
                  toFlowH(r.flow).toFixed(2), // Flow
@@ -972,7 +987,7 @@ const App: React.FC = () => {
 
          return [
              results.length - i,
-             r.mode,
+             type,
              t.toFixed(2),
              x.toFixed(2),
              toFlowH(r.flow).toFixed(2),
@@ -1177,7 +1192,20 @@ const App: React.FC = () => {
         </div>
 
         <div className="mt-auto pt-6 space-y-3">
-          <button onClick={() => { setResults([]); setVisuals([]); setDrawingPoints([]); addLog("Workspace cleared."); }} className="w-full py-4 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-black text-xs uppercase tracking-widest rounded-2xl border dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all flex items-center justify-center gap-2" title="Clear all measurements and visuals">
+          <button onClick={() => { 
+              setResults([]); 
+              setVisuals([]); 
+              setDrawingPoints([]); 
+              addLog("Workspace cleared."); 
+              analysisCountersRef.current = {
+                [AnalysisMode.LINE]: 0,
+                [AnalysisMode.POLYGON]: 0,
+                [AnalysisMode.PLATOON]: 0,
+                [AnalysisMode.LOOP_DETECTOR]: 0,
+              };
+            }} 
+            className="w-full py-4 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-black text-xs uppercase tracking-widest rounded-2xl border dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all flex items-center justify-center gap-2" title="Clear all measurements and visuals"
+          >
             <Trash2 size={16} /> Flush Workspace
           </button>
         </div>
@@ -1359,7 +1387,7 @@ const App: React.FC = () => {
                           {(results.length - i).toString().padStart(2, '0')}
                         </td>
                         <td className="px-4 py-3 text-xs font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider">
-                          {res.mode}
+                          {res.batchId ? `${res.mode} ${res.batchId}` : res.mode}
                         </td>
                         <td className="px-4 py-3 font-mono text-xs text-slate-700 dark:text-slate-300">{t.toFixed(2)}</td>
                         <td className="px-4 py-3 font-mono text-xs text-slate-700 dark:text-slate-300">{x.toFixed(2)}</td>
@@ -1388,6 +1416,7 @@ const App: React.FC = () => {
                               {toDensityKm(res.density).toFixed(2)}
                             </td>
                             <td className="px-4 py-3 font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
+                              {/* FIX: Corrected variable from 'r' to 'res' to avoid reference error. */}
                               {toSpeedKmh(res.speed).toFixed(2)}
                             </td>
                             <td className="px-4 py-3 font-mono text-xs text-slate-500 dark:text-slate-500">

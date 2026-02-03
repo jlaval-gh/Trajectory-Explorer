@@ -40,4 +40,5 @@ export interface AnalysisResult {
   count?: number;
   waveSpeed?: number;
   experimentId: number;
+  batchId?: number;
 }
