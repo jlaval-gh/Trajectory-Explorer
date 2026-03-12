@@ -14,7 +14,8 @@ import {
   calculatePolygonArea, 
   getClippedSegmentMetrics,
   getLineIntersection,
-  getSegmentLineIntersection
+  getSegmentLineIntersection,
+  isPointInPolygon
 } from './utils/geometry';
 import FundamentalDiagram from './components/FundamentalDiagram';
 import { DraggableWindow } from './components/DraggableWindow';
@@ -103,6 +104,7 @@ const App: React.FC = () => {
   const [results, setResults] = useState<AnalysisResult[]>([]);
   const [visuals, setVisuals] = useState<AnalysisVisual[]>([]);
   const [drawingPoints, setDrawingPoints] = useState<Point[]>([]);
+  const [contextMenu, setContextMenu] = useState<{ x: number, y: number, polygon: Point[] } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [platoonN, setPlatoonN] = useState<number>(5);
   // Default Segment Height 30m
@@ -453,7 +455,150 @@ const App: React.FC = () => {
     return null;
   };
 
+  useEffect(() => {
+    const handleClickOutside = () => {
+      if (contextMenu) setContextMenu(null);
+    };
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [contextMenu]);
+
+  const handleContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    if (mode !== AnalysisMode.POLYGON) return;
+    
+    const worldPoint = getMousePosOnCanvas(e);
+    if (!worldPoint) return;
+    
+    // Find if worldPoint is inside any of the drawn polygons
+    const clickedPolygon = visuals.find(v => v.mode === AnalysisMode.POLYGON && isPointInPolygon(worldPoint, v.points));
+    
+    if (clickedPolygon) {
+      setContextMenu({
+        x: e.clientX,
+        y: e.clientY,
+        polygon: clickedPolygon.points
+      });
+    } else {
+      setContextMenu(null);
+    }
+  };
+
+  const generateSVG = (polygon: Point[]) => {
+    if (!imgDimensions) return;
+    
+    // Find the bottom edge of the polygon
+    // The bottom edge is the one with the lowest average y value (since y is distance and usually 0 is at the bottom)
+    let minAvgY = Infinity;
+    let bottomEdge: [Point, Point] = [polygon[0], polygon[1]];
+    for (let i = 0; i < polygon.length; i++) {
+      const p1 = polygon[i];
+      const p2 = polygon[(i + 1) % polygon.length];
+      const avgY = (p1.y + p2.y) / 2;
+      if (avgY < minAvgY) {
+        minAvgY = avgY;
+        bottomEdge = [p1, p2];
+      }
+    }
+
+    // Find trajectories crossing the bottom edge
+    const includedTrajectories = trajectories.filter(t => {
+      for (let i = 0; i < t.points.length - 1; i++) {
+        const intersection = getLineIntersection(bottomEdge[0], bottomEdge[1], t.points[i], t.points[i+1]);
+        if (intersection) return true;
+      }
+      return false;
+    });
+
+    const width = imgDimensions.width;
+    const height = imgDimensions.height;
+    
+    let svgContent = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}">\n`;
+    
+    includedTrajectories.forEach(t => {
+      let currentPolyline: Point[] = [];
+      const polylines: Point[][] = [];
+      
+      for (let i = 0; i < t.points.length - 1; i++) {
+        const p1 = t.points[i];
+        const p2 = t.points[i+1];
+        const p1In = isPointInPolygon(p1, polygon);
+        const p2In = isPointInPolygon(p2, polygon);
+        
+        const intersections: { point: Point, dist: number }[] = [];
+        for (let j = 0; j < polygon.length; j++) {
+          const edgeP1 = polygon[j];
+          const edgeP2 = polygon[(j + 1) % polygon.length];
+          const inter = getLineIntersection(p1, p2, edgeP1, edgeP2);
+          if (inter) {
+            intersections.push({
+              point: inter,
+              dist: Math.hypot(inter.x - p1.x, inter.y - p1.y)
+            });
+          }
+        }
+        intersections.sort((a, b) => a.dist - b.dist);
+        
+        if (p1In) {
+          if (currentPolyline.length === 0) {
+            currentPolyline.push(p1);
+          } else {
+            const last = currentPolyline[currentPolyline.length - 1];
+            if (last.x !== p1.x || last.y !== p1.y) {
+              currentPolyline.push(p1);
+            }
+          }
+        }
+        
+        if (p1In && p2In) {
+          currentPolyline.push(p2);
+        } else if (p1In && !p2In) {
+          if (intersections.length > 0) {
+            currentPolyline.push(intersections[0].point);
+          }
+          polylines.push(currentPolyline);
+          currentPolyline = [];
+        } else if (!p1In && p2In) {
+          if (intersections.length > 0) {
+            currentPolyline.push(intersections[intersections.length - 1].point);
+          }
+          currentPolyline.push(p2);
+        } else if (!p1In && !p2In) {
+          if (intersections.length >= 2) {
+            polylines.push([intersections[0].point, intersections[intersections.length - 1].point]);
+          }
+        }
+      }
+      
+      if (currentPolyline.length > 0) {
+        polylines.push(currentPolyline);
+      }
+      
+      polylines.forEach(poly => {
+        if (poly.length > 1) {
+          const pointsStr = poly.map(p => {
+            const pix = toPixel(p);
+            return `${pix.x},${pix.y}`;
+          }).join(' ');
+          svgContent += `  <polyline points="${pointsStr}" fill="none" stroke="blue" stroke-width="2" />\n`;
+        }
+      });
+    });
+    
+    svgContent += `</svg>`;
+    
+    const blob = new Blob([svgContent], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'traj.sgv';
+    a.click();
+    URL.revokeObjectURL(url);
+    setContextMenu(null);
+  };
+
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (contextMenu) setContextMenu(null);
     if (!image || trajectories.length === 0) return;
     const worldPoint = getMousePosOnCanvas(e);
     if (!canvasRef.current || !imgDimensions) return;
@@ -1316,6 +1461,7 @@ const App: React.FC = () => {
                       <canvas 
                         ref={canvasRef} 
                         onClick={handleCanvasClick} 
+                        onContextMenu={handleContextMenu}
                         onMouseMove={(e) => setMouseCoord(getMousePosOnCanvas(e))}
                         onMouseLeave={() => setMouseCoord(null)}
                         className={`cursor-crosshair block ${darkMode ? 'invert hue-rotate-180 contrast-90' : ''}`}
@@ -1341,6 +1487,19 @@ const App: React.FC = () => {
               className="hidden" 
               {...{ webkitdirectory: "", directory: "" } as any}
             />
+            {contextMenu && (
+              <div 
+                className="fixed z-50 bg-white dark:bg-slate-800 shadow-lg rounded-md border border-slate-200 dark:border-slate-700 py-1 min-w-[120px]"
+                style={{ top: contextMenu.y, left: contextMenu.x }}
+              >
+                <button 
+                  className="w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
+                  onClick={() => generateSVG(contextMenu.polygon)}
+                >
+                  ToVector
+                </button>
+              </div>
+            )}
           </div>
         </div>
 

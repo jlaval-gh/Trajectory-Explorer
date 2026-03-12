@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Label, ReferenceLine, ReferenceDot, Customized } from 'recharts';
+import { ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Label, ReferenceLine, ReferenceDot } from 'recharts';
 import { AnalysisResult, AnalysisMode } from '../types';
 import { Ruler, Trash2, ChevronDown } from 'lucide-react';
 
@@ -35,45 +35,6 @@ const axisConfig: Record<ChartMode, { x: string; y: string; xName: string; yName
     's-h': { x: 's', y: 'h', xName: 'Spacing', yName: 'Headway', xUnit: 'm', yUnit: 's' },
 };
 
-// Robust Overlay Component to capture clicks via SVG coordinates and invert D3 scales
-const SlopeClickLayer = (props: any) => {
-    const { xAxisMap, yAxisMap, offset, onChartClick, isSlopeMode } = props;
-    
-    // If not in slope mode, don't render the blocking overlay
-    if (!isSlopeMode || !xAxisMap || !yAxisMap || !offset) return null;
-
-    return (
-        <rect
-            x={offset.left}
-            y={offset.top}
-            width={offset.width}
-            height={offset.height}
-            fill="rgba(255,255,255,0)" 
-            style={{ cursor: 'crosshair', pointerEvents: 'all' }}
-            onClick={(e) => {
-                 const svgNode = (e.target as Element).closest('svg');
-                 if (svgNode) {
-                    const pt = svgNode.createSVGPoint();
-                    pt.x = e.clientX;
-                    pt.y = e.clientY;
-                    // Transform screen coordinate to SVG coordinate
-                    const svgP = pt.matrixTransform(svgNode.getScreenCTM()?.inverse());
-                    
-                    // Access D3 scales from Recharts internals
-                    const xScale = Object.values(xAxisMap)[0] as any;
-                    const yScale = Object.values(yAxisMap)[0] as any;
-                    
-                    if (xScale?.scale && yScale?.scale) {
-                        const k = xScale.scale.invert(svgP.x);
-                        const val = yScale.scale.invert(svgP.y);
-                        onChartClick(k, val);
-                    }
-                 }
-            }}
-        />
-    )
-};
-
 const renderCustomPoint = (props: any) => {
   const { cx, cy, fill, payload } = props;
 
@@ -102,6 +63,8 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results, onReco
   
   // Current incomplete line points
   const [currentPoints, setCurrentPoints] = useState<{x: number, y: number}[]>([]);
+  // Current mouse position for drawing feedback
+  const [mousePos, setMousePos] = useState<{x: number, y: number} | null>(null);
   // Completed lines
   const [savedLines, setSavedLines] = useState<{p1: {x: number, y: number}, p2: {x: number, y: number}}[]>([]);
 
@@ -113,7 +76,64 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results, onReco
 
   const config = axisConfig[chartMode];
 
-  // Callback for the robust overlay
+  // Callback for chart clicks
+  const handleChartClick = (e: any) => {
+    if (!isSlopeMode || !e) return;
+
+    let x: number | undefined = undefined;
+    let y: number | undefined = undefined;
+
+    // Recharts event object parsing with explicit null/undefined checks
+    // This handles Recharts 3.x event structures reliably
+    if (e.xValue !== undefined && e.xValue !== null) {
+      x = Number(e.xValue);
+    }
+    if (e.yValue !== undefined && e.yValue !== null) {
+      y = Number(e.yValue);
+    }
+
+    // Fallback to activePayload if clicking directly on a data point
+    if ((x === undefined || y === undefined) && e.activePayload && e.activePayload.length > 0) {
+      const payload = e.activePayload[0].payload;
+      if (payload) {
+        if (payload.x !== undefined && payload.x !== null) x = Number(payload.x);
+        if (payload.y !== undefined && payload.y !== null) y = Number(payload.y);
+      }
+    }
+
+    // Ensure we have valid numbers (including 0)
+    if (x !== undefined && y !== undefined && !isNaN(x) && !isNaN(y)) {
+      handleOverlayClick(x, y);
+    }
+  };
+
+  const handleChartMouseMove = (e: any) => {
+    if (!isSlopeMode || currentPoints.length === 0 || !e) {
+      if (mousePos) setMousePos(null);
+      return;
+    }
+
+    let x: number | undefined = undefined;
+    let y: number | undefined = undefined;
+
+    if (e.xValue !== undefined && e.xValue !== null) x = Number(e.xValue);
+    if (e.yValue !== undefined && e.yValue !== null) y = Number(e.yValue);
+
+    if ((x === undefined || y === undefined) && e.activePayload && e.activePayload.length > 0) {
+      const payload = e.activePayload[0].payload;
+      if (payload) {
+        if (payload.x !== undefined && payload.x !== null) x = Number(payload.x);
+        if (payload.y !== undefined && payload.y !== null) y = Number(payload.y);
+      }
+    }
+
+    if (x !== undefined && y !== undefined && !isNaN(x) && !isNaN(y)) {
+      setMousePos({ x, y });
+    } else {
+      setMousePos(null);
+    }
+  };
+
   const handleOverlayClick = (x: number, y: number) => {
     // Validate bounds
     if (x < 0 || y < 0) return; // Basic sanity check
@@ -127,6 +147,7 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results, onReco
         const newLine = { p1: currentPoints[0], p2: newPoint };
         setSavedLines(prev => [...prev, newLine]);
         setCurrentPoints([]); // Reset current
+        setMousePos(null); // Reset mouse pos
         
         // Log slope
         const slope = calculateSlope(newLine.p1, newLine.p2);
@@ -198,7 +219,12 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results, onReco
       
       <div className="flex-1 w-full min-h-0 relative">
         <ResponsiveContainer width="100%" height="100%">
-          <ScatterChart margin={{ top: 5, right: 10, bottom: 5, left: 0 }}>
+          <ScatterChart 
+            margin={{ top: 5, right: 10, bottom: 5, left: 0 }}
+            onClick={handleChartClick}
+            onMouseMove={handleChartMouseMove}
+            onMouseLeave={() => setMousePos(null)}
+          >
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={gridColor} />
             <XAxis 
               type="number" 
@@ -296,9 +322,6 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results, onReco
                     lineType="joint"
                     shape={renderCustomPoint}
                     isAnimationActive={false}
-                    onClick={(e: any) => {
-                         if(isSlopeMode && e.payload) handleOverlayClick(e.payload.x, e.payload.y);
-                    }}
                     style={{ cursor: isSlopeMode ? 'crosshair' : 'default' }}
                  />
                );
@@ -345,7 +368,16 @@ const FundamentalDiagram: React.FC<FundamentalDiagramProps> = ({ results, onReco
                <ReferenceDot key={`curr-${i}`} x={p.x} y={p.y} r={4} fill="#f43f5e" stroke="white" strokeWidth={2} />
             ))}
             
-            <Customized component={<SlopeClickLayer onChartClick={handleOverlayClick} isSlopeMode={isSlopeMode} />} />
+            {/* Draw Temporary Line */}
+            {isSlopeMode && currentPoints.length === 1 && mousePos && (
+               <ReferenceLine 
+                   segment={[currentPoints[0], mousePos]} 
+                   stroke="#f43f5e" 
+                   strokeWidth={2} 
+                   strokeDasharray="3 3"
+                   isFront={true}
+               />
+            )}
 
           </ScatterChart>
         </ResponsiveContainer>
